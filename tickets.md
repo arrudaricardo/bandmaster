@@ -175,12 +175,12 @@ Work the **frontier**: any ticket whose blockers are all done. Several branches 
 
 **Blocked by:** Plan dependencies and assign ready tasks; Recover interrupted finalization safely.
 
-- [ ] Claims release and dependent tasks become ready only after complete transactional batch success.
-- [ ] Later collecting batches use the updated branch base and cannot admit dependencies from their own batch.
-- [ ] A successful no-op satisfies prerequisites without creating an empty commit.
-- [ ] Session completion requires every task to be committed, no-op, or validly canceled and every claim to be released.
-- [ ] Final repository validation passes and the working tree and index are clean before completion.
-- [ ] Successful completion leaves validated local commits on the original branch and performs no remote Git operation.
+- [x] Claims release and dependent tasks become ready only after complete transactional batch success.
+- [x] Later collecting batches use the updated branch base and cannot admit dependencies from their own batch.
+- [x] A successful no-op satisfies prerequisites without creating an empty commit.
+- [x] Session completion requires every task to be committed, no-op, or validly canceled and every claim to be released.
+- [x] Final repository validation passes and the working tree and index are clean before completion.
+- [x] Successful completion leaves validated local commits on the original branch and performs no remote Git operation.
 
 ## Abort active work without losing edits
 

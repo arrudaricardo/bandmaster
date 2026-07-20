@@ -557,6 +557,9 @@ func (p *Project) completeFinalization(db *sql.DB, sessionID, batchID string) *E
 	if _, err := tx.Exec(`DELETE FROM claims WHERE batch_id = ?`, batchID); err != nil {
 		return sessionInternal(sessionID, "release committed claims", err)
 	}
+	if projectError := advanceDependentTasks(tx, sessionID, batchID, now); projectError != nil {
+		return projectError
+	}
 	if _, err := tx.Exec(`INSERT INTO batch_audit_events(session_id, batch_id, event, from_status, to_status, occurred_at) VALUES(?, ?, 'batch_committed', 'final_validating', 'committed', ?)`, sessionID, batchID, now); err != nil {
 		return sessionInternal(sessionID, "audit committed batch", err)
 	}
@@ -568,6 +571,45 @@ func (p *Project) completeFinalization(db *sql.DB, sessionID, batchID string) *E
 	}
 	if err := tx.Commit(); err != nil {
 		return sessionInternal(sessionID, "commit finalization completion", err)
+	}
+	return nil
+}
+
+func advanceDependentTasks(tx *sql.Tx, sessionID, batchID, now string) *Error {
+	rows, err := tx.Query(`SELECT DISTINCT dependent.id FROM tasks dependent JOIN task_dependencies dependency ON dependency.task_id = dependent.id JOIN batch_members prerequisite_member ON prerequisite_member.task_id = dependency.prerequisite_id WHERE dependent.session_id = ? AND dependent.status = 'planned' AND prerequisite_member.batch_id = ? ORDER BY dependent.creation_order`, sessionID, batchID)
+	if err != nil {
+		return sessionInternal(sessionID, "find dependent tasks", err)
+	}
+	defer rows.Close()
+	var candidates []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return sessionInternal(sessionID, "read dependent task", err)
+		}
+		candidates = append(candidates, id)
+	}
+	if err := rows.Err(); err != nil {
+		return sessionInternal(sessionID, "scan dependent tasks", err)
+	}
+	for _, id := range candidates {
+		prerequisites, projectError := taskPrerequisites(tx, sessionID, id)
+		if projectError != nil {
+			return projectError
+		}
+		ready, projectError := taskReadiness(tx, prerequisites)
+		if projectError != nil {
+			return projectError
+		}
+		if ready != "ready" {
+			continue
+		}
+		if _, err := tx.Exec(`UPDATE tasks SET status = 'ready', updated_at = ? WHERE id = ? AND status = 'planned'`, now, id); err != nil {
+			return sessionInternal(sessionID, "advance dependent task", err)
+		}
+		if _, err := tx.Exec(`INSERT INTO task_audit_events(session_id, task_id, event, from_status, to_status, occurred_at) VALUES(?, ?, 'task_ready', 'planned', 'ready', ?)`, sessionID, id, now); err != nil {
+			return sessionInternal(sessionID, "audit dependent task readiness", err)
+		}
 	}
 	return nil
 }

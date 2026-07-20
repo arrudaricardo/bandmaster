@@ -12,6 +12,7 @@ func TestCommitBatchCreatesOrderedTaskCommitsAndCompletesNoOps(t *testing.T) {
 	started := successfulSessionCommand(t, repo, "start")
 	changed := successfulTaskCommand(t, repo, "create", "--title", "Change owned", "--intent", "Make the fixture change", "--expected-outcome", "Owned content changes")
 	noOp := successfulTaskCommand(t, repo, "create", "--title", "Inspect fixture", "--intent", "Leave the fixture unchanged", "--expected-outcome", "No content changes")
+	dependent := successfulTaskCommand(t, repo, "create", "--title", "Use committed change", "--intent", "Start only after the changed task commits", "--expected-outcome", "Ready in the next batch", "--prerequisite", changed.Result.ID)
 	changedAssignment := successfulTaskCommand(t, repo, "assign", changed.Result.ID, "--worker", "commit-changed")
 	noOpAssignment := successfulTaskCommand(t, repo, "assign", noOp.Result.ID, "--worker", "commit-noop")
 	successfulTaskCommand(t, repo, "claim", changed.Result.ID, "--token", changedAssignment.Result.AssignmentToken, "--path", "owned.txt")
@@ -32,6 +33,9 @@ func TestCommitBatchCreatesOrderedTaskCommitsAndCompletesNoOps(t *testing.T) {
 	if task := successfulTaskCommand(t, repo, "inspect", noOp.Result.ID); task.Result.Status != "no_op" || len(task.Result.Claims) != 0 {
 		t.Fatalf("no-op task was not completed and released: %+v", task.Result)
 	}
+	if task := successfulTaskCommand(t, repo, "inspect", dependent.Result.ID); task.Result.Status != "ready" || task.Result.BatchID != "" {
+		t.Fatalf("dependent task was not released for a later batch: %+v", task.Result)
+	}
 	if status := strings.TrimSpace(runGit(t, repo, "status", "--porcelain")); status != "" {
 		t.Fatalf("committed batch left worktree dirty: %s", status)
 	}
@@ -41,6 +45,18 @@ func TestCommitBatchCreatesOrderedTaskCommitsAndCompletesNoOps(t *testing.T) {
 	}
 	if retried := successfulBatchCommand(t, repo, "commit"); retried.Result.ID != frozen.Result.ID || retried.Result.Status != "committed" {
 		t.Fatalf("committed batch was not idempotent: %+v", retried.Result)
+	}
+}
+
+func TestSessionFinishValidatesCleanCompletedWork(t *testing.T) {
+	repo := repositoryWithValidation(t, "\n  commands:\n    - name: final-check\n      argv: [\"/bin/sh\", \"-c\", \"test -f README.md\"]\n      timeout: 2s\n")
+	started := successfulSessionCommand(t, repo, "start")
+	finished := successfulSessionCommand(t, repo, "finish")
+	if finished.Result.Status != "completed" || finished.Result.ID != started.Result.ID {
+		t.Fatalf("session was not completed: %+v", finished.Result)
+	}
+	if status := strings.TrimSpace(runGit(t, repo, "status", "--porcelain")); status != "" {
+		t.Fatalf("completion left repository dirty: %s", status)
 	}
 }
 

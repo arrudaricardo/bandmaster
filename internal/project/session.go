@@ -217,12 +217,15 @@ func (p *Project) TransitionSession(action string) (Session, *Error) {
 		}
 	}
 	if action == "finish" {
-		var incomplete int
+		var incomplete, claims int
 		if err := tx.QueryRow(`SELECT COUNT(*) FROM tasks WHERE session_id = ? AND status NOT IN ('committed', 'no_op', 'canceled')`, current.ID).Scan(&incomplete); err != nil {
 			return Session{}, sessionInternal(current.ID, "inspect incomplete session tasks", err)
 		}
-		if incomplete != 0 {
-			return Session{}, invalidSession(current.ID, "session_tasks_incomplete", fmt.Sprintf("Session %s has %d incomplete task(s).", current.ID, incomplete))
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM claims WHERE session_id = ?`, current.ID).Scan(&claims); err != nil {
+			return Session{}, sessionInternal(current.ID, "inspect unreleased session claims", err)
+		}
+		if incomplete != 0 || claims != 0 {
+			return Session{}, invalidSession(current.ID, "session_tasks_incomplete", fmt.Sprintf("Session %s has %d incomplete task(s) and %d unreleased claim(s).", current.ID, incomplete, claims))
 		}
 	}
 
@@ -291,6 +294,9 @@ func (p *Project) completeSessionFinish(db *sql.DB, session Session) *Error {
 		_ = p.StopIntegrityMonitor(session.ID)
 		return integrityError(session.ID, observations[0])
 	}
+	if projectError := p.runSessionFinalValidation(db, session); projectError != nil {
+		return projectError
+	}
 	if projectError := p.StopIntegrityMonitor(session.ID); projectError != nil {
 		observation := integrityObservation{Kind: "monitor_unhealthy", Path: ".git/bandmaster/monitor", ObservedState: map[string]any{"error": projectError.Message}}
 		if persistError := p.persistIntegrityViolations(session, []integrityObservation{observation}); persistError != nil {
@@ -299,6 +305,31 @@ func (p *Project) completeSessionFinish(db *sql.DB, session Session) *Error {
 		return integrityError(session.ID, observation)
 	}
 	return markSessionCompleted(db, session.ID)
+}
+
+func (p *Project) runSessionFinalValidation(db *sql.DB, session Session) *Error {
+	config, _, projectError := p.readApprovedConfiguration(db)
+	if projectError != nil {
+		projectError.SessionID = session.ID
+		return projectError
+	}
+	for index, configured := range config.Validation.Commands {
+		if status, err := gitOutput(p.Root, "status", "--porcelain=v1"); err != nil || status != "" {
+			return invalidSession(session.ID, "session_completion_dirty_worktree", "The repository changed before final session validation.")
+		}
+		run := p.runOfficialValidationCommand(1, int64(index+1), officialValidationCommand{source: "repository", validationCommand: configured})
+		if status, err := gitOutput(p.Root, "status", "--porcelain=v1"); err != nil || status != "" {
+			observation := integrityObservation{Kind: "session_final_validation_mutation", Path: ".", ObservedState: map[string]string{"status": status}}
+			if projectError := p.persistIntegrityViolations(session, []integrityObservation{observation}); projectError != nil {
+				return projectError
+			}
+			return integrityError(session.ID, observation)
+		}
+		if run.Status != "passed" {
+			return validationFailure(session.ID, run)
+		}
+	}
+	return nil
 }
 
 func markSessionCompleted(db *sql.DB, sessionID string) *Error {
