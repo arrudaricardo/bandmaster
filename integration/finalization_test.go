@@ -2,6 +2,7 @@ package integration_test
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -120,6 +121,100 @@ func TestCommitBatchQuarantinesHookChangeOutsideClaims(t *testing.T) {
 	}
 	if session := successfulSessionCommand(t, repo, "inspect"); session.Result.Status != "paused" {
 		t.Fatalf("integrity failure did not pause the session: %+v", session.Result)
+	}
+}
+
+func TestCommitBatchRecoversKnownInterruptedFinalizationSteps(t *testing.T) {
+	for _, step := range []string{"prepared", "committing", "validating"} {
+		t.Run(step, func(t *testing.T) {
+			repo := repositoryWithValidation(t, "")
+			started := successfulSessionCommand(t, repo, "start")
+			task := successfulTaskCommand(t, repo, "create", "--title", "Crash recovery", "--intent", "Recover a stopped finalization", "--expected-outcome", "Repairable changes")
+			assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "crash-worker")
+			successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "owned.txt")
+			writeFile(t, filepath.Join(repo, "owned.txt"), "recoverable content\n")
+			submitBatchTask(t, repo, task.Result.ID, assignment.Result.AssignmentToken)
+			successfulBatchCommand(t, repo, "freeze")
+			successfulBatchCommand(t, repo, "validate")
+			crashed := runBandmasterWithEnvironment(t, repo, []string{"BANDMASTER_TEST_CRASH_FINALIZATION_AT=" + step}, "batch", "commit", "--json")
+			if crashed.exitCode != 97 {
+				t.Fatalf("finalization did not crash at %s: %+v", step, crashed)
+			}
+			recovered := runBandmaster(t, repo, "batch", "commit", "--json")
+			if recovered.exitCode != 3 || !strings.Contains(recovered.stdout, "finalization_failed") {
+				session := successfulSessionCommand(t, repo, "inspect")
+				t.Fatalf("fresh process did not recover %s: %+v violations=%+v", step, recovered, session.Result.IntegrityViolations)
+			}
+			if head := strings.TrimSpace(runGit(t, repo, "rev-parse", "HEAD")); head != started.Result.StartingCommit {
+				t.Fatalf("%s recovery retained provisional commit %s", step, head)
+			}
+			if content := readFile(t, filepath.Join(repo, "owned.txt")); content != "recoverable content\n" {
+				t.Fatalf("%s recovery lost edits: %q", step, content)
+			}
+			if batch := successfulBatchCommand(t, repo, "inspect"); batch.Result.Status != "repair_pending" {
+				t.Fatalf("%s recovery did not require repair: %+v", step, batch.Result)
+			}
+		})
+	}
+}
+
+func runBandmasterWithEnvironment(t *testing.T, dir string, environment []string, args ...string) commandResult {
+	t.Helper()
+	cmd := exec.Command(bandmasterBinary, args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), environment...)
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	result := commandResult{stdout: stdout.String(), stderr: stderr.String()}
+	if err == nil {
+		return result
+	}
+	if exitError, ok := err.(*exec.ExitError); ok {
+		result.exitCode = exitError.ExitCode()
+		return result
+	}
+	t.Fatalf("run bandmaster with environment: %v", err)
+	return result
+}
+
+func TestCommitBatchQuarantinesExternalGitStateAfterInterruption(t *testing.T) {
+	mutations := map[string]func(*testing.T, string){
+		"index": func(t *testing.T, repo string) {
+			writeFile(t, filepath.Join(repo, "external.txt"), "staged\n")
+			runGit(t, repo, "add", "external.txt")
+		},
+		"branch": func(t *testing.T, repo string) { runGit(t, repo, "checkout", "-b", "external") },
+		"head": func(t *testing.T, repo string) {
+			writeFile(t, filepath.Join(repo, "external.txt"), "committed\n")
+			runGit(t, repo, "add", "external.txt")
+			runGit(t, repo, "-c", "user.name=Tests", "-c", "user.email=tests@example.invalid", "commit", "-m", "external activity")
+		},
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			repo := repositoryWithValidation(t, "")
+			successfulSessionCommand(t, repo, "start")
+			task := successfulTaskCommand(t, repo, "create", "--title", "Interrupted", "--intent", "Leave a journal", "--expected-outcome", "Quarantine unknown state")
+			assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "external-worker")
+			successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "owned.txt")
+			writeFile(t, filepath.Join(repo, "owned.txt"), "worker content\n")
+			submitBatchTask(t, repo, task.Result.ID, assignment.Result.AssignmentToken)
+			successfulBatchCommand(t, repo, "freeze")
+			successfulBatchCommand(t, repo, "validate")
+			crashed := runBandmasterWithEnvironment(t, repo, []string{"BANDMASTER_TEST_CRASH_FINALIZATION_AT=prepared"}, "batch", "commit", "--json")
+			if crashed.exitCode != 97 {
+				t.Fatalf("did not create interrupted state: %+v", crashed)
+			}
+			mutate(t, repo)
+			failed := runBandmaster(t, repo, "batch", "commit", "--json")
+			if failed.exitCode != 4 || !strings.Contains(failed.stdout, "integrity") {
+				t.Fatalf("%s state was accepted: %+v", name, failed)
+			}
+			if session := successfulSessionCommand(t, repo, "inspect"); session.Result.Status != "paused" {
+				t.Fatalf("%s state did not pause session: %+v", name, session.Result)
+			}
+		})
 	}
 }
 

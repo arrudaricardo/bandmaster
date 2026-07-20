@@ -164,9 +164,9 @@ Work the **frontier**: any ticket whose blockers are all done. Several branches 
 **Blocked by:** Enforce hook integrity and roll back failed finalization.
 
 - [x] Expected branch and pre-batch commit, clean index state, frozen manifest, recoverable content, ordered commit plan, and journal step are durably recorded before Git mutation.
-- [ ] Crash tests terminate finalization at every persisted journal step and resume through a fresh CLI process.
+- [x] Crash tests terminate finalization at every persisted journal step and resume through a fresh CLI process.
 - [x] A known journaled Git state continues or rolls back to the same all-or-nothing outcome as an uninterrupted failure.
-- [ ] Unknown HEAD, index, branch, external Git activity, monitor state, or unprovably stopped hook process pauses and quarantines the batch.
+- [x] Unknown HEAD, index, branch, external Git activity, monitor state, or unprovably stopped hook process pauses and quarantines the batch.
 - [x] Provisional commits may remain as unreachable objects after rollback but never remain as a partially accepted batch.
 
 ## Advance dependent batches and complete a session

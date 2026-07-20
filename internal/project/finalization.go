@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"time"
@@ -66,12 +68,14 @@ func (p *Project) CommitBatch() (Batch, *Error) {
 	if projectError := recordFinalizationJournal(db, session.ID, batchID, branch, preBatchCommit, members); projectError != nil {
 		return Batch{}, projectError
 	}
+	crashFinalizationForTest("prepared")
 	if projectError := beginFinalization(db, session.ID, batchID); projectError != nil {
 		return Batch{}, projectError
 	}
 	if projectError := updateFinalizationJournalStep(db, session.ID, batchID, "committing"); projectError != nil {
 		return Batch{}, p.rollbackFinalization(db, session, batchID, branch, preBatchCommit, projectError)
 	}
+	crashFinalizationForTest("committing")
 	for _, member := range members {
 		if !member.changed {
 			continue
@@ -97,6 +101,7 @@ func (p *Project) CommitBatch() (Batch, *Error) {
 	if projectError := updateFinalizationJournalStep(db, session.ID, batchID, "validating"); projectError != nil {
 		return Batch{}, p.rollbackFinalization(db, session, batchID, branch, preBatchCommit, projectError)
 	}
+	crashFinalizationForTest("validating")
 	if projectError := p.runFinalValidation(db, session, batchID); projectError != nil {
 		return Batch{}, p.rollbackFinalization(db, session, batchID, branch, preBatchCommit, projectError)
 	}
@@ -112,6 +117,14 @@ func (p *Project) CommitBatch() (Batch, *Error) {
 // rollbackFinalization preserves every observed worktree edit while returning the
 // branch and index to their pre-finalization state. A failed preservation is an
 // ambiguous rollback, so it quarantines rather than offering unsafe repair.
+// crashFinalizationForTest is a deliberately narrow subprocess fault-injection seam.
+// It exits only when explicitly requested by an integration test.
+func crashFinalizationForTest(step string) {
+	if os.Getenv("BANDMASTER_TEST_CRASH_FINALIZATION_AT") == step {
+		os.Exit(97)
+	}
+}
+
 type finalizationJournal struct {
 	Branch, PreBatchCommit string
 }
@@ -137,9 +150,12 @@ func (p *Project) recoverInterruptedFinalization(db *sql.DB, session Session, ba
 	if indexErr != nil || index != "" {
 		return false, p.quarantineFinalization(db, session, batchID, "verify interrupted finalization index", fmt.Errorf("staged paths %q", index))
 	}
+	if running, hookError := p.finalizationHookRunning(); hookError != nil || running {
+		return false, p.quarantineFinalization(db, session, batchID, "verify interrupted finalization hook", fmt.Errorf("hook running=%t: %v", running, hookError))
+	}
 	monitor, monitorError := inspectLatestMonitor(db, session.ID)
-	if monitorError != nil || !monitorHealthy(monitor, time.Now().UTC()) {
-		return false, p.quarantineFinalization(db, session, batchID, "verify interrupted finalization monitor", fmt.Errorf("monitor is not provably healthy: %v", monitorError))
+	if monitorError != nil || !monitorStopped(monitor) {
+		return false, p.quarantineFinalization(db, session, batchID, "verify interrupted finalization monitor", fmt.Errorf("monitor is not provably stopped: %v", monitorError))
 	}
 	rows, err := db.Query(`SELECT committed.commit_sha FROM task_commits committed JOIN tasks task ON task.id = committed.task_id WHERE committed.batch_id = ? ORDER BY task.creation_order`, batchID)
 	if err != nil {
@@ -162,6 +178,25 @@ func (p *Project) recoverInterruptedFinalization(db *sql.DB, session Session, ba
 	}
 	cause := invalidSession(session.ID, "finalization_interrupted", "A previous finalization process stopped before completion.")
 	return true, p.rollbackFinalization(db, session, batchID, journal.Branch, journal.PreBatchCommit, cause)
+}
+
+// finalizationHookRunning refuses recovery while a hook from this repository may
+// still mutate the worktree. Failure to inspect processes is not safe proof.
+func (p *Project) finalizationHookRunning() (bool, error) {
+	hooks, err := gitOutput(p.Root, "rev-parse", "--path-format=absolute", "--git-path", "hooks")
+	if err != nil {
+		return false, err
+	}
+	output, err := exec.Command("ps", "-axo", "command=").Output()
+	if err != nil {
+		return false, err
+	}
+	for _, line := range strings.Split(string(output), "\n") {
+		if strings.Contains(line, hooks+string(os.PathSeparator)) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func recordFinalizationJournal(db *sql.DB, sessionID, batchID, branch, preBatchCommit string, members []finalizationMember) *Error {
@@ -193,6 +228,11 @@ func (p *Project) rollbackFinalization(db *sql.DB, session Session, batchID, bra
 	if statusErr != nil {
 		return p.quarantineFinalization(db, session, batchID, "capture finalization failure state", statusErr)
 	}
+	committedPatchBytes, patchErr := gitBytes(p.Root, "diff", "--binary", preBatchCommit+"..HEAD")
+	if patchErr != nil {
+		return p.quarantineFinalization(db, session, batchID, "capture provisional finalization commits", patchErr)
+	}
+	committedPatch := string(committedPatchBytes)
 	stashOutput, stashErr := gitOutput(p.Root, "stash", "push", "--include-untracked", "-m", "bandmaster finalization rollback")
 	if stashErr != nil {
 		return p.quarantineFinalization(db, session, batchID, "capture finalization edits", stashErr)
@@ -203,6 +243,22 @@ func (p *Project) rollbackFinalization(db *sql.DB, session Session, batchID, bra
 	}
 	if _, err := gitOutput(p.Root, "reset", "--hard", preBatchCommit); err != nil {
 		return p.quarantineFinalization(db, session, batchID, "restore pre-finalization commit", err)
+	}
+	if committedPatch != "" {
+		patch, err := os.CreateTemp("", "bandmaster-finalization-*.patch")
+		if err != nil {
+			return p.quarantineFinalization(db, session, batchID, "persist provisional finalization commits", err)
+		}
+		patchName := patch.Name()
+		if _, err := patch.WriteString(committedPatch); err != nil || patch.Close() != nil {
+			_ = os.Remove(patchName)
+			return p.quarantineFinalization(db, session, batchID, "persist provisional finalization commits", err)
+		}
+		defer os.Remove(patchName)
+		command := exec.Command("git", "-C", p.Root, "apply", "--binary", patchName)
+		if output, err := command.CombinedOutput(); err != nil {
+			return p.quarantineFinalization(db, session, batchID, "restore provisional finalization commits", fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output))))
+		}
 	}
 	if stashed {
 		if _, err := gitOutput(p.Root, "stash", "pop"); err != nil {

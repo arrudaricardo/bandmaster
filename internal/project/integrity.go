@@ -116,6 +116,19 @@ func (p *Project) PrepareMutation(command string) *Error {
 	return integrityError(session.ID, observations[0])
 }
 
+// monitorStopped proves that a finalization monitor was deliberately stopped and
+// is no longer running. A stale "stopped" record with a live process is unsafe.
+func monitorStopped(monitor IntegrityMonitor) bool {
+	if monitor.Status != "stopped" {
+		return false
+	}
+	if monitor.ProcessID <= 0 {
+		return true
+	}
+	_, err := processStartIdentity(monitor.ProcessID)
+	return errors.Is(err, errProcessNotRunning)
+}
+
 func monitorHealthy(monitor IntegrityMonitor, now time.Time) bool {
 	if monitor.Status != "healthy" || monitor.ProcessID <= 0 || monitor.ProcessIdentity == "" || monitor.HeartbeatAt == "" || monitor.LastFullScanAt == "" {
 		return false
