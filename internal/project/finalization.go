@@ -63,9 +63,14 @@ func (p *Project) CommitBatch() (Batch, *Error) {
 		if !member.changed {
 			continue
 		}
-		sha, projectError := p.commitTask(session, batchID, member)
+		sha, hookChanged, projectError := p.commitTask(session, batchID, member)
 		if projectError != nil {
 			return Batch{}, p.rollbackFinalization(db, session, batchID, branch, preBatchCommit, projectError)
+		}
+		if hookChanged {
+			if projectError := recordHookChange(db, session.ID, member.id); projectError != nil {
+				return Batch{}, p.rollbackFinalization(db, session, batchID, branch, preBatchCommit, projectError)
+			}
 		}
 		if projectError := recordTaskCommit(db, session.ID, batchID, member.id, sha); projectError != nil {
 			return Batch{}, p.rollbackFinalization(db, session, batchID, branch, preBatchCommit, projectError)
@@ -92,6 +97,10 @@ func (p *Project) CommitBatch() (Batch, *Error) {
 // branch and index to their pre-finalization state. A failed preservation is an
 // ambiguous rollback, so it quarantines rather than offering unsafe repair.
 func (p *Project) rollbackFinalization(db *sql.DB, session Session, batchID, branch, preBatchCommit string, cause *Error) *Error {
+	failureStatus, statusErr := gitOutput(p.Root, "status", "--porcelain=v1")
+	if statusErr != nil {
+		return p.quarantineFinalization(db, session, batchID, "capture finalization failure state", statusErr)
+	}
 	stashOutput, stashErr := gitOutput(p.Root, "stash", "push", "--include-untracked", "-m", "bandmaster finalization rollback")
 	if stashErr != nil {
 		return p.quarantineFinalization(db, session, batchID, "capture finalization edits", stashErr)
@@ -114,6 +123,13 @@ func (p *Project) rollbackFinalization(db *sql.DB, session Session, batchID, bra
 		}
 		return p.quarantineFinalization(db, session, batchID, "verify restored index", err)
 	}
+	if finalizationCauseIsIntegrity(cause) {
+		observation := integrityObservation{Kind: "finalization_integrity_violation", Path: ".", BatchID: batchID, ObservedState: map[string]string{"cause": cause.Code, "status": failureStatus}}
+		if projectError := p.persistIntegrityViolations(session, []integrityObservation{observation}); projectError != nil {
+			return projectError
+		}
+		return integrityError(session.ID, observation)
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	tx, err := db.Begin()
 	if err != nil {
@@ -133,6 +149,10 @@ func (p *Project) rollbackFinalization(db *sql.DB, session Session, batchID, bra
 		return sessionInternal(session.ID, "commit finalization failure recovery", err)
 	}
 	return invalidSession(session.ID, "finalization_failed", fmt.Sprintf("Finalization was rolled back: %s", cause.Message))
+}
+
+func finalizationCauseIsIntegrity(cause *Error) bool {
+	return cause.Code == "integrity_violation" || cause.Code == "finalization_dirty_worktree" || strings.HasPrefix(cause.Code, "commit_")
 }
 
 func (p *Project) quarantineFinalization(db *sql.DB, session Session, batchID, operation string, cause error) *Error {
@@ -195,65 +215,106 @@ func finalizationMembers(db *sql.DB, sessionID, batchID string) ([]finalizationM
 	return members, nil
 }
 
-func (p *Project) commitTask(session Session, batchID string, member finalizationMember) (string, *Error) {
+func (p *Project) commitTask(session Session, batchID string, member finalizationMember) (string, bool, *Error) {
 	parent, err := gitOutput(p.Root, "rev-parse", "HEAD")
 	if err != nil {
-		return "", sessionInternal(session.ID, "read commit parent", err)
+		return "", false, sessionInternal(session.ID, "read commit parent", err)
 	}
 	if len(member.paths) == 0 {
-		return "", invalidSession(session.ID, "task_has_no_claims", "A changed submitted task has no claims.")
+		return "", false, invalidSession(session.ID, "task_has_no_claims", "A changed submitted task has no claims.")
+	}
+	before, projectError := p.captureFinalizationPaths(member.paths)
+	if projectError != nil {
+		return "", false, projectError
 	}
 	changed, err := gitOutput(p.Root, append([]string{"diff", "--name-only", "--"}, member.paths...)...)
 	if err != nil {
-		return "", sessionInternal(session.ID, "inspect task changes", err)
+		return "", false, sessionInternal(session.ID, "inspect task changes", err)
 	}
 	expectedPaths := strings.Fields(changed)
 	if len(expectedPaths) == 0 {
-		return "", invalidSession(session.ID, "submission_snapshot_mismatch", "A changed submission has no current Git-visible changes.")
+		return "", false, invalidSession(session.ID, "submission_snapshot_mismatch", "A changed submission has no current Git-visible changes.")
 	}
 	args := append([]string{"add", "--"}, member.paths...)
 	if _, err := gitOutput(p.Root, args...); err != nil {
-		return "", sessionInternal(session.ID, "stage task changes", err)
+		return "", false, sessionInternal(session.ID, "stage task changes", err)
 	}
 	staged, err := gitOutput(p.Root, "diff", "--cached", "--name-only", "--")
 	if err != nil {
-		return "", sessionInternal(session.ID, "inspect staged task paths", err)
+		return "", false, sessionInternal(session.ID, "inspect staged task paths", err)
 	}
 	if !samePaths(strings.Fields(staged), expectedPaths) {
-		return "", invalidSession(session.ID, "commit_path_mismatch", "Staging included paths outside the task's claims or missed a claimed path.")
+		return "", false, invalidSession(session.ID, "commit_path_mismatch", "Staging included paths outside the task's claims or missed a claimed path.")
 	}
 	message := deterministicCommitMessage(member)
 	if _, err := gitOutput(p.Root, "commit", "-m", message); err != nil {
-		return "", invalidSession(session.ID, "git_commit_failed", fmt.Sprintf("Commit for task %s failed: %v", member.id, err))
+		return "", false, invalidSession(session.ID, "git_commit_failed", fmt.Sprintf("Commit for task %s failed: %v", member.id, err))
 	}
 	sha, err := gitOutput(p.Root, "rev-parse", "HEAD")
 	if err != nil {
-		return "", sessionInternal(session.ID, "read task commit", err)
+		return "", false, sessionInternal(session.ID, "read task commit", err)
 	}
 	actualParent, err := gitOutput(p.Root, "rev-parse", "HEAD^")
 	if err != nil || actualParent != parent {
-		return "", invalidSession(session.ID, "commit_parent_mismatch", "Task commit did not advance HEAD by exactly one expected commit.")
+		return "", false, invalidSession(session.ID, "commit_parent_mismatch", "Task commit did not advance HEAD by exactly one expected commit.")
 	}
 	if branch, err := gitOutput(p.Root, "branch", "--show-current"); err != nil || branch != session.StartingBranch {
-		return "", invalidSession(session.ID, "commit_branch_mismatch", "Task commit changed the finalization branch.")
+		return "", false, invalidSession(session.ID, "commit_branch_mismatch", "Task commit changed the finalization branch.")
 	}
 	if message, err := gitOutput(p.Root, "log", "-1", "--format=%B", "HEAD"); err != nil || message != deterministicCommitMessage(member) {
-		return "", invalidSession(session.ID, "commit_message_mismatch", "Task commit message differs from the deterministic Bandmaster message.")
+		return "", false, invalidSession(session.ID, "commit_message_mismatch", "Task commit message differs from the deterministic Bandmaster message.")
 	}
 	if index, err := gitOutput(p.Root, "diff", "--cached", "--name-only"); err != nil || index != "" {
-		return "", invalidSession(session.ID, "commit_index_mismatch", "Task commit left staged changes in the index.")
+		return "", false, invalidSession(session.ID, "commit_index_mismatch", "Task commit left staged changes in the index.")
 	}
 	if dirty, err := gitOutput(p.Root, append([]string{"diff", "--name-only", "--"}, member.paths...)...); err != nil || dirty != "" {
-		return "", invalidSession(session.ID, "commit_claim_dirty", "Task commit left claimed changes unstaged or dirty.")
+		return "", false, invalidSession(session.ID, "commit_claim_dirty", "Task commit left claimed changes unstaged or dirty.")
 	}
 	committed, err := gitOutput(p.Root, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD")
 	if err != nil {
-		return "", sessionInternal(session.ID, "inspect task commit paths", err)
+		return "", false, sessionInternal(session.ID, "inspect task commit paths", err)
 	}
 	if !samePaths(strings.Fields(committed), expectedPaths) {
-		return "", invalidSession(session.ID, "commit_path_mismatch", "Task commit does not contain exactly its claimed paths.")
+		return "", false, invalidSession(session.ID, "commit_path_mismatch", "Task commit does not contain exactly its claimed paths.")
 	}
-	return sha, nil
+	after, projectError := p.captureFinalizationPaths(member.paths)
+	if projectError != nil {
+		return "", false, projectError
+	}
+	return sha, !finalizationSnapshotsEqual(before, after), nil
+}
+
+func (p *Project) captureFinalizationPaths(paths []string) ([]capturedSnapshot, *Error) {
+	snapshots := make([]capturedSnapshot, 0, len(paths))
+	for _, path := range paths {
+		snapshot, projectError := p.capturePath(path)
+		if projectError != nil {
+			return nil, projectError
+		}
+		snapshot.Path = path
+		snapshots = append(snapshots, snapshot)
+	}
+	return snapshots, nil
+}
+
+func finalizationSnapshotsEqual(before, after []capturedSnapshot) bool {
+	if len(before) != len(after) {
+		return false
+	}
+	for index := range before {
+		if before[index].Path != after[index].Path || !snapshotsEqual(before[index].PathSnapshot, after[index].PathSnapshot) {
+			return false
+		}
+	}
+	return true
+}
+
+func recordHookChange(db *sql.DB, sessionID, taskID string) *Error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.Exec(`INSERT INTO task_audit_events(session_id, task_id, event, from_status, to_status, occurred_at) VALUES(?, ?, 'hook_change_committed', 'submitted', 'submitted', ?)`, sessionID, taskID, now); err != nil {
+		return sessionInternal(sessionID, "audit committed hook change", err)
+	}
+	return nil
 }
 
 func deterministicCommitMessage(member finalizationMember) string {

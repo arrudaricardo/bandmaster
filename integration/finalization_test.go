@@ -79,3 +79,59 @@ func TestCommitBatchRollsBackHookFailureAndPreservesEdits(t *testing.T) {
 		t.Fatalf("ordinary hook failure did not enter repair pending: %+v", batch.Result)
 	}
 }
+
+func TestCommitBatchQuarantinesHookChangeOutsideClaims(t *testing.T) {
+	repo := repositoryWithValidation(t, "")
+	successfulSessionCommand(t, repo, "start")
+	task := successfulTaskCommand(t, repo, "create", "--title", "Change owned", "--intent", "Make the fixture change", "--expected-outcome", "Owned content changes")
+	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "hook-worker")
+	successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "owned.txt")
+	writeFile(t, filepath.Join(repo, "owned.txt"), "worker content\n")
+	submitBatchTask(t, repo, task.Result.ID, assignment.Result.AssignmentToken)
+	successfulBatchCommand(t, repo, "freeze")
+	successfulBatchCommand(t, repo, "validate")
+	hook := filepath.Join(repo, ".git", "hooks", "pre-commit")
+	writeFile(t, hook, "#!/bin/sh\nprintf outside > outside.txt\n")
+	if err := os.Chmod(hook, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	failed := runBandmaster(t, repo, "batch", "commit", "--json")
+	if failed.exitCode != 4 || !strings.Contains(failed.stdout, "integrity") {
+		t.Fatalf("outside hook change was not quarantined: exit=%d stdout=%s", failed.exitCode, failed.stdout)
+	}
+	if content := readFile(t, filepath.Join(repo, "outside.txt")); content != "outside" {
+		t.Fatalf("outside hook edit was not restored: %q", content)
+	}
+	if session := successfulSessionCommand(t, repo, "inspect"); session.Result.Status != "paused" {
+		t.Fatalf("integrity failure did not pause the session: %+v", session.Result)
+	}
+}
+
+func TestCommitBatchIncludesAndAuditsStagedClaimHookChange(t *testing.T) {
+	repo := repositoryWithValidation(t, "")
+	successfulSessionCommand(t, repo, "start")
+	task := successfulTaskCommand(t, repo, "create", "--title", "Change owned", "--intent", "Make the fixture change", "--expected-outcome", "Owned content changes")
+	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "hook-worker")
+	successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "owned.txt")
+	writeFile(t, filepath.Join(repo, "owned.txt"), "worker content\n")
+	submitBatchTask(t, repo, task.Result.ID, assignment.Result.AssignmentToken)
+	successfulBatchCommand(t, repo, "freeze")
+	successfulBatchCommand(t, repo, "validate")
+	hook := filepath.Join(repo, ".git", "hooks", "pre-commit")
+	writeFile(t, hook, "#!/bin/sh\nprintf hook-content > owned.txt\ngit add owned.txt\n")
+	if err := os.Chmod(hook, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	successfulBatchCommand(t, repo, "commit")
+	if content := strings.TrimSpace(runGit(t, repo, "show", "HEAD:owned.txt")); content != "hook-content" {
+		t.Fatalf("staged hook content was not committed: %q", content)
+	}
+	inspected := successfulTaskCommand(t, repo, "inspect", task.Result.ID)
+	found := false
+	for _, event := range inspected.Result.AuditHistory {
+		found = found || event.Event == "hook_change_committed"
+	}
+	if !found {
+		t.Fatalf("committed hook change was not audited: %+v", inspected.Result.AuditHistory)
+	}
+}

@@ -150,12 +150,12 @@ Work the **frontier**: any ticket whose blockers are all done. Several branches 
 
 **Blocked by:** Commit a successful batch by task; Detect and quarantine repository integrity drift.
 
-- [ ] Each provisional commit is verified for expected parent, one-commit advance, exact path set, complete content, cleanliness, message, branch, and index state.
-- [ ] A hook-produced change to the current task's claim is accepted only when included in that task's commit and recorded in audit history.
-- [ ] Hook changes outside current claims, unstaged or dirty claimed changes, unexpected Git state, and message rewrites fail finalization.
-- [ ] Failure state is captured before restoring the original branch to the pre-batch commit and restoring a clean index.
-- [ ] Every Git-visible edit observed at failure is recreated as uncommitted work, including permitted hook changes.
-- [ ] Unambiguous ordinary failures enter repair pending; integrity violations and ambiguous rollback enter quarantine and pause the session.
+- [x] Each provisional commit is verified for expected parent, one-commit advance, exact path set, complete content, cleanliness, message, branch, and index state.
+- [x] A hook-produced change to the current task's claim is accepted only when included in that task's commit and recorded in audit history.
+- [x] Hook changes outside current claims, unstaged or dirty claimed changes, unexpected Git state, and message rewrites fail finalization.
+- [x] Failure state is captured before restoring the original branch to the pre-batch commit and restoring a clean index.
+- [x] Every Git-visible edit observed at failure is recreated as uncommitted work, including permitted hook changes.
+- [x] Unambiguous ordinary failures enter repair pending; integrity violations and ambiguous rollback enter quarantine and pause the session.
 
 ## Recover interrupted finalization safely
 
@@ -209,7 +209,7 @@ Work the **frontier**: any ticket whose blockers are all done. Several branches 
 
 ## Prove MVP acceptance across supported platforms
 
-**What to build:** Demonstrate the complete release contract on macOS and Linux through the canonical CLI integration harness and an actual Codex-driven project.
+**What to build:** Demonstrate the complete release contract on macOS through the canonical CLI integration harness and an actual Codex-driven project.
 
 **Blocked by:** Support the complete Git-visible path model; Recover interrupted finalization safely; Advance dependent batches and complete a session; Drive Bandmaster through the generated Codex skill.
 
