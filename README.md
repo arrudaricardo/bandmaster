@@ -1,179 +1,214 @@
-# Bandmaster
+<p align="center">
+  <img src="docs/assets/bandmaster-logo.png" alt="Bandmaster — coordinated coding agents" width="460">
+</p>
 
-Bandmaster is a local Go CLI for coordinating parallel Codex workers in one Git working tree. This repository currently implements project initialization, explicit validation-configuration approval, persisted sessions, durable task planning and assignment, and complete Git-visible file claim and submission.
+<h1 align="center">Bandmaster</h1>
 
-## Install
+<p align="center">
+  <strong>Safe, durable coordination for parallel Codex workers in one Git working tree.</strong>
+</p>
 
-Bandmaster requires Go 1.24 or newer:
+<p align="center">
+  <a href="#why-bandmaster">Why Bandmaster</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#safety-model">Safety model</a> ·
+  <a href="#agent-protocol">Agent protocol</a>
+</p>
+
+---
+
+Parallel coding agents are fast—until two agents edit the same file, a worker disappears mid-task, or an unreviewed diff lands in Git. **Bandmaster makes shared-working-tree parallelism deliberate.** It gives one parent agent a durable plan, exact file ownership, worker leases, batch barriers, validation, and attributable commits.
+
+Bandmaster is a local Go CLI. It keeps its runtime state under Git metadata, creates no remote branches, and never pushes.
+
+## Why Bandmaster
+
+| Without coordination | With Bandmaster |
+| --- | --- |
+| Agents can silently overwrite one another. | Workers atomically claim exact Git-visible paths before writing. |
+| Context disappears when a parent or worker stops. | Tasks, leases, handoffs, snapshots, and audit history persist locally. |
+| A passing individual change can break the combined tree. | Frozen batches run focused and repository validation before committing. |
+| Commits are hard to attribute or unwind. | One deterministic commit is created per changed task—or the batch rolls back safely. |
+| A lost worker might still be editing. | Expired or interrupted work is quarantined until termination is proven or explicitly confirmed. |
+
+## What you get
+
+- **Parallelism without file races** — disjoint, all-or-nothing path claims in a single working tree.
+- **A durable orchestration record** — sessions, dependencies, assignment attempts, leases, baselines, handoffs, validation, and audit events survive process restarts.
+- **Git integrity protection** — a monitor detects unclaimed edits, submitted-path drift, index/HEAD/branch drift, and unsafe validation mutations.
+- **A real commit barrier** — batch membership is frozen, validation is ordered and recorded, then changed tasks are committed in deterministic order.
+- **Recovery over guesswork** — failed or interrupted finalization restores the baseline while preserving observed edits; ambiguous state is quarantined.
+- **A generated Codex skill** — `bandmaster init` installs project-local instructions for a parent-led, token-based worker protocol.
+
+## Quick start
+
+**Requirements:** Go 1.24+, Git, and a normal clean Git working tree.
 
 ```sh
+# Install
 go install github.com/bandmaster-dev/bandmaster/cmd/bandmaster@latest
-```
 
-## Initialize
-
-Run initialization from a standard Git repository or any directory beneath its root:
-
-```sh
+# In the repository you want to coordinate
 bandmaster init
-```
 
-Initialization creates `.bandmaster.yaml`, detects likely validation commands from Go, Node, Rust, and Python project manifests, and overwrites `.agents/skills/bandmaster/SKILL.md` with the current generated Codex skill. An existing `.bandmaster.yaml` is validated and preserved.
-
-Review the configuration, inspect its digest, and approve that exact digest:
-
-```sh
+# Review the generated validation configuration, then approve its exact digest
 bandmaster config status
 bandmaster config approve <digest>
-```
 
-Approval is local runtime state in `.git/bandmaster/state.db`; it is not tracked or copied to new clones. Changing `.bandmaster.yaml` changes its digest and makes the current configuration unapproved.
-
-## Sessions
-
-After committing the initialized project files and approving the current validation digest, start a session from a clean, attached branch:
-
-```sh
+# Commit the generated project files, then start a clean session
 bandmaster session start
-bandmaster session inspect
 ```
 
-Only one session may be open in a repository. Session state, the starting branch and commit, monitor identity and heartbeat, integrity violations, and transition audit history persist under `.git/bandmaster/` across CLI invocations. A claimless session supports these lifecycle commands:
+`init` writes `.bandmaster.yaml` and installs `.agents/skills/bandmaster/SKILL.md`. The configuration is intentionally unapproved at first: review the validation commands before authorizing them. Approval is local to the clone and invalidates whenever the configuration changes.
+
+> **Agent integrations:** append `--json` to every Bandmaster command. Schema-versioned JSON is the stable automation contract.
+
+## How it works
+
+```text
+plan → assign → claim → edit → submit → freeze → validate → commit → finish
+                    ↑                         │
+                    └──── repair / requeue ────┘
+```
+
+### 1. Plan independent work
+
+The parent creates durable tasks. Dependencies are released only after prerequisite work succeeds in an earlier batch.
 
 ```sh
-bandmaster session pause
-bandmaster session resume
-bandmaster session finish
+bandmaster task create \
+  --title "Add parser" \
+  --intent "Parse quoted fields" \
+  --expected-outcome "Quoted input is accepted"
+
+bandmaster task create \
+  --title "Document parser" \
+  --intent "Explain quoted fields" \
+  --expected-outcome "Docs cover the new syntax" \
+  --prerequisite <parser-task-id>
 ```
 
-An active session owns one long-lived integrity monitor. Filesystem notifications provide prompt advisory checks, periodic full scans remain authoritative, and every mutating command requires a healthy monitor and a successful current-state scan. Bandmaster pauses the session and quarantines affected task and batch state if it observes an unclaimed non-ignored path, a changed submitted snapshot, index drift, HEAD drift, branch drift, base drift, or an unhealthy monitor.
+### 2. Assign and claim exact paths
 
-After inspecting and restoring every recorded violation, explicitly recover it while the session remains paused, then resume. Recovery records the confirmation and performs another full scan before a new monitor generation can become active:
+The parent assigns a ready task and retains the returned assignment token. A worker claims its entire initial write set **before** editing.
 
 ```sh
-bandmaster integrity recover --confirmation "Removed the unowned file after inspection"
-bandmaster session resume
+bandmaster task assign <task-id> --worker worker-parser --json
+bandmaster task claim <task-id> --token <assignment-token> \
+  --path internal/parser.go \
+  --path internal/parser_test.go --json
 ```
 
-Ignored untracked paths remain outside Bandmaster ownership and rollback guarantees. Tracked paths are always covered even when an ignore rule matches them. Resume also requires approval of the current configuration digest.
+Claims are atomic: an overlap blocks the whole attempt rather than granting a partial set. Claims record baselines for regular files, symlinks, absent files, deletions, and executable bits.
 
-## Tasks
+### 3. Keep workers accountable
 
-Create tasks during an active session. Tasks without prerequisites are immediately ready; a dependent remains planned until every prerequisite is committed or completes as a successful no-op in an earlier batch:
+Every token-bearing command renews the worker lease. Long-running workers heartbeat, review their diff, submit a structured handoff, and stop editing.
 
 ```sh
-bandmaster task create --title "Build parser" --intent "Accept task plans" --expected-outcome "Valid plans persist"
-bandmaster task create --title "Wire command" --intent "Expose planning" --expected-outcome "Agents can create tasks" --prerequisite <task-id>
-bandmaster task list
-bandmaster task inspect <task-id>
+bandmaster task heartbeat <task-id> --token <assignment-token> --json
+bandmaster task diff <task-id> --token <assignment-token> --json
+bandmaster task submit <task-id> --token <assignment-token> \
+  --behavior-changed "Parser accepts quoted fields" \
+  --key-decisions "Kept streaming tokenization" \
+  --validation-expectations "Parser and repository checks pass" \
+  --known-risks "None" --json
 ```
 
-Assign a ready task to a worker. The response includes the opaque assignment token used by later worker commands:
+### 4. Freeze, validate, and finalize
+
+Once workers have stopped editing, the parent freezes the collecting batch. Bandmaster validates focused task checks followed by approved repository checks, with authoritative scans around each command.
 
 ```sh
-bandmaster task assign <task-id> --worker <worker-id>
+bandmaster batch freeze --json
+bandmaster batch validate --json
+bandmaster batch commit --json
+bandmaster session finish --json
 ```
 
-Assignment freezes the plan for that worker attempt. To replan or cancel assigned claimless work, first terminate the worker, identify it with `--terminated-worker`, and pass opaque evidence from the parent-held worker handle with `--termination-proof`. Bandmaster records the evidence and atomically revokes the assignment token. Replanning supplies the complete replacement plan, and omitting `--prerequisite` clears the prerequisite list:
+A successful finalization creates one deterministic local commit per changed task. A no-op task completes without an empty commit. Claims release and dependent tasks become ready only after the complete batch succeeds.
+
+## Safety model
+
+Bandmaster favors **preserving work and making uncertainty visible** over guessing.
+
+- **No hidden Git mutations:** workers must not add, commit, reset, stash, rebase, checkout, or change branches. Bandmaster owns finalization.
+- **Continuous integrity checks:** unowned Git-visible edits, submitted snapshot drift, and Git control-state drift pause the session and quarantine affected work.
+- **Validation cannot mutate the tree:** a check that changes Git-visible state is an integrity violation, not a passing validation run.
+- **Failed commits preserve edits:** hook, commit, validation, and interruption failures restore the pre-batch branch and index while retaining observed work as uncommitted edits when it is safe to do so.
+- **Ambiguity stays quarantined:** a lost worker, uncertain hook, or unknown external Git state is never silently resumed.
+- **Abort is non-destructive:** `bandmaster session abort --termination-confirmation "…"` stops orchestration, clears safe claims, and leaves uncommitted Git-visible work in place for inspection.
+
+Ignored untracked paths and external side effects are intentionally outside Bandmaster's rollback guarantee. See [MVP_SPEC.md](MVP_SPEC.md) for the complete contract.
+
+## Agent protocol
+
+Bandmaster's generated skill is designed for a **single parent orchestrator** and multiple workers:
+
+1. Use orchestration only when at least two tasks are independently implementable and testable.
+2. The parent alone creates tasks, assigns workers, manages retries, freezes batches, validates, finalizes, and may spawn workers.
+3. Workers use JSON commands and assignment tokens; they claim before writing, heartbeat while active, submit a handoff, and then stop.
+4. The parent requeues blocked workers, assigns repairs to original owners, and never transfers a claim implicitly.
+5. If a session is discovered after a parent interruption, report it and offer to resume—do not silently start replacement workers.
+6. Lost worker handles require parent-held termination proof or explicit audited user confirmation before replacement.
+
+The generated instructions live at `.agents/skills/bandmaster/SKILL.md` after initialization.
+
+## Session operations
 
 ```sh
-bandmaster task replan <task-id> --title "New title" --intent "New intent" --expected-outcome "New outcome" --terminated-worker <worker-id> --termination-proof <proof>
-bandmaster task cancel <task-id> --terminated-worker <worker-id> --termination-proof <proof>
+bandmaster session inspect --json
+bandmaster session pause --json
+bandmaster integrity recover --confirmation "Reviewed and restored the repository" --json
+bandmaster session resume --json
+bandmaster session abort --termination-confirmation "All worker handles have exited" --json
 ```
 
-A task with active dependents cannot be canceled until those dependents are canceled or replanned. A session cannot finish while any task is nonterminal.
+Only one open session is allowed per repository. A new session requires a clean, attached branch and index.
 
-### Worker Claims
+## Automation contract
 
-An assigned worker first performs a read-only preflight with its complete initial exact-file write set and any focused validation commands. Focused validation is supplied as JSON with a stable name, exactly one of `argv` or `script`, a repository-relative working directory, timeout, and optional environment overrides:
+Every command supports `--json` and returns schema version 1:
 
-```sh
-bandmaster task preflight <task-id> --token <assignment-token> --path internal/parser.go --validation '{"name":"parser-tests","argv":["go","test","./internal/parser"],"working_directory":".","timeout":"2m"}'
-bandmaster task claim <task-id> --token <assignment-token> --path internal/parser.go --validation '{"name":"parser-tests","argv":["go","test","./internal/parser"],"working_directory":".","timeout":"2m"}'
+```json
+{
+  "schema_version": "1",
+  "command": "task assign",
+  "success": true,
+  "result": {}
+}
 ```
 
-The initial claim is all-or-nothing. Success records complete baseline snapshots, joins the collecting batch, moves the task to `editing`, and permanently freezes its core planning fields. A conflicting initial write set moves the task to `blocked` without claims; after the conflicting owner releases its claim, requeue and assign the blocked task with a new worker token. An editing worker uses the same claim command to atomically expand its write set:
+On failure, `error.code` and `error.retryable` are stable machine-readable fields. Exit classes are stable too:
 
-```sh
-bandmaster task claim <task-id> --token <assignment-token> --path newly-discovered.go
-bandmaster task release <task-id> --token <assignment-token> --path unused.go
-bandmaster task requeue <blocked-task-id>
-```
-
-Release succeeds only while every requested path still exactly matches its recorded baseline. Claims accept canonical existing regular files and symlinks plus safely resolvable absent destinations. Snapshots preserve exact file bytes or symlink targets and executable state; directories, parent-symlink traversal, Git metadata, nested repositories, path aliases, and unsupported file types are rejected.
-
-Assignment creates a worker lease using the approved `worker_lease_duration` from `.bandmaster.yaml`. Every token-bearing worker command renews it; workers should also heartbeat during long editing periods:
-
-```sh
-bandmaster task heartbeat <task-id> --token <assignment-token>
-```
-
-An expired lease moves the task to `quarantined` without releasing claims. Recover it only after proving termination through the parent-held worker handle, or after obtaining explicit user confirmation when that handle is unavailable. Recovery revokes the old token; assigning the repair-pending task gives the replacement a new token while retaining claims, baselines, and edits:
-
-```sh
-bandmaster task recover <task-id> --terminated-worker <worker-id> --termination-proof <proof> --diagnosis "Worker lease expired with partial edits" --intended-repair "Continue the retained work"
-bandmaster task recover <task-id> --user-confirmation "<confirmation>" --diagnosis "Worker lease expired with partial edits" --intended-repair "Continue the retained work"
-bandmaster task assign <task-id> --worker <replacement-worker-id>
-```
-
-After editing, review every claimed path from its recorded baseline, then submit a structured handoff:
-
-```sh
-bandmaster task diff <task-id> --token <assignment-token>
-bandmaster task submit <task-id> --token <assignment-token> --behavior-changed "Parser accepts quoted fields" --key-decisions "Kept tokenization streaming" --validation-expectations "Parser tests and repository checks pass" --known-risks "None"
-```
-
-Submission rejects any Git-visible changed path without an owner and freezes every claimed current snapshot. An unchanged submission remains `submitted` with outcome `pending_no_op`; it does not create an empty commit.
-
-## Batch Barrier
-
-After every active worker has submitted, blocked, failed, or been deliberately stopped, freeze the current collecting batch:
-
-```sh
-bandmaster batch freeze
-bandmaster batch inspect [batch-id]
-```
-
-The barrier performs authoritative repository scans, rejects active workers and unsubmitted members, verifies every changed path has exactly one submitted owner, and copies the ordered membership, ownership, baselines, and submitted snapshots into a persisted frozen manifest. Preflight and blocked tasks never join the batch, and dependent tasks remain planned until their prerequisites succeed in an earlier batch. A successful freeze moves the session to `finalizing` and stops the active-session monitor so official validation can take exclusive control in the next workflow stage.
-
-## Batch Validation
-
-Run official validation only after the batch barrier:
-
-```sh
-bandmaster batch validate
-bandmaster batch inspect [batch-id]
-```
-
-Bandmaster runs each worker-declared focused command in frozen membership order, then each approved repository command in configuration order. Commands run sequentially with authoritative scans before and after each command. Any Git-visible mutation quarantines the batch and pauses the session, even when the command exits successfully. An ordinary non-zero exit or timeout creates no commit, retains claims and edits, moves the batch to `repair_pending`, and returns the session to monitored active state for repair selection.
-
-Reopen each original owner whose paths require repair, recording why the prior attempt failed and what the replacement should change. Worker-handle termination evidence is required unless the user explicitly confirms that the old worker stopped:
-
-```sh
-bandmaster task repair <task-id> --terminated-worker <worker-id> --termination-proof <proof> --diagnosis "Combined validation failed" --intended-repair "Correct the owned parser paths"
-bandmaster task repair <task-id> --user-confirmation "I confirmed the old worker stopped" --diagnosis "Combined validation failed" --intended-repair "Correct the owned parser paths"
-bandmaster task assign <task-id> --worker <replacement-worker-id>
-```
-
-Repair invalidates only the selected owners' stale submissions while retaining their claims, original baselines, current edits, batch membership, and batch base. Replacement workers receive fresh tokens and may atomically expand into currently unowned paths. If several owners are involved, reopen each one separately; claims are never transferred. Unrelated work cannot join the closed repairing batch, and `batch freeze` remains blocked until every reopened owner reviews and resubmits.
-
-Validation uses a documented minimal ambient environment: `CI`, `HOME`, `LANG`, `LC_ALL`, `PATH`, `TEMP`, `TMP`, `TMPDIR`, and `TZ` are inherited when present, with a standard system `PATH` fallback. Each command's declared `environment` values override that set. The repository root is the default working directory when `working_directory` is omitted. `batch inspect` records the declared and resolved command, canonical directory, timeout, environment and overrides, status, exit code, duration, and up to 64 KiB each of standard output and error with truncation flags.
-
-Bandmaster rejects bare repositories, linked worktrees, external Git directories, sparse checkouts, submodules, repositories nested inside other repositories, and repositories containing nested Git metadata.
-
-## Agent Output
-
-Every command supports `--json`. Schema version 1 responses contain `schema_version`, `command`, `success`, and exactly one of `result` or `error`. Error responses contain a stable `code`, a human-readable `message`, and `retryable`.
-
-Schema 1 fields will not be removed or change meaning. Additive fields may be introduced. Consumers must ignore fields they do not recognize.
-
-Exit classes are stable:
-
-| Exit code | Class |
-| --- | --- |
+| Code | Meaning |
+| ---: | --- |
 | `0` | Success |
 | `1` | Internal failure |
 | `2` | Blocked work |
 | `3` | Invalid input, state, or unsupported repository |
 | `4` | Integrity quarantine |
 | `5` | Validation failure |
+
+## Development
+
+```sh
+go test ./... -timeout 30m
+go build ./cmd/bandmaster
+```
+
+CI exercises the CLI integration suite on macOS and Linux, verifies installation through Go, and cross-compiles Darwin ARM64 and Linux AMD64 binaries.
+
+## Learn more
+
+- [MVP specification](MVP_SPEC.md) — full product behavior and safety guarantees
+- [Generated skill source](internal/project/project.go) — the project-local Codex protocol
+- [Integration tests](integration/) — public CLI and Git-visible workflow examples
+
+---
+
+<p align="center">
+  <strong>Coordinate boldly. Commit confidently.</strong><br>
+  Bandmaster keeps parallel coding work moving without losing the plot—or the work.
+</p>
