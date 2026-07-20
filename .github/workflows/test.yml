@@ -18,4 +18,30 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: go test ./...
+      # The CLI integration harness deliberately exercises long-lived monitor
+      # processes and real Git repositories; the default ten-minute Go package
+      # timeout is too short for the full acceptance suite.
+      - run: go test ./... -timeout 30m
+
+  distribution:
+    needs: test
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install through Go distribution
+        run: |
+          export GOBIN="$RUNNER_TEMP/bin"
+          mkdir -p "$GOBIN"
+          go install ./cmd/bandmaster
+          "$GOBIN/bandmaster" version --json
+      - name: Cross-compile release binaries
+        run: |
+          mkdir -p dist
+          GOOS=darwin GOARCH=arm64 go build -o dist/bandmaster-darwin-arm64 ./cmd/bandmaster
+          GOOS=linux GOARCH=amd64 go build -o dist/bandmaster-linux-amd64 ./cmd/bandmaster

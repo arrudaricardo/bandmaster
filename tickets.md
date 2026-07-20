@@ -214,8 +214,8 @@ Work the **frontier**: any ticket whose blockers are all done. Several branches 
 **Blocked by:** Support the complete Git-visible path model; Recover interrupted finalization safely; Advance dependent batches and complete a session; Drive Bandmaster through the generated Codex skill.
 
 - [ ] All eighteen acceptance scenarios from the source PRD pass in temporary Git repositories and the Codex-driven project.
-- [ ] Platform-sensitive path aliases, Unicode behavior, executable bits, notifications, process liveness, and hook behavior run on both macOS and Linux.
-- [ ] Release binaries and installation through standard Go distribution produce consistent CLI behavior.
+- [x] Platform-sensitive path aliases, Unicode behavior, executable bits, notifications, process liveness, and hook behavior run on both macOS and Linux.
+- [x] Release binaries and installation through standard Go distribution produce consistent CLI behavior.
 - [ ] Stable JSON compatibility, typed errors, retryability, and distinct exit classes are verified across the complete workflow.
 - [ ] Tests assert public CLI and Git-visible behavior rather than private SQLite layouts, transition helpers, or Git subprocess choreography.
 - [ ] Any lower test seam is limited to deterministic clock, monitor-event, process, Git, hook, or crash fault injection and still asserts public state outcomes.
