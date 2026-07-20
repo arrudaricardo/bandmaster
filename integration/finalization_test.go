@@ -107,6 +107,33 @@ func TestCommitBatchQuarantinesHookChangeOutsideClaims(t *testing.T) {
 	}
 }
 
+func TestCommitBatchQuarantinesUnknownStateAfterInterruptedFinalization(t *testing.T) {
+	repo := repositoryWithValidation(t, "")
+	successfulSessionCommand(t, repo, "start")
+	task := successfulTaskCommand(t, repo, "create", "--title", "Change owned", "--intent", "Make the fixture change", "--expected-outcome", "Owned content changes")
+	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "crash-worker")
+	successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "owned.txt")
+	writeFile(t, filepath.Join(repo, "owned.txt"), "worker content\n")
+	submitBatchTask(t, repo, task.Result.ID, assignment.Result.AssignmentToken)
+	successfulBatchCommand(t, repo, "freeze")
+	successfulBatchCommand(t, repo, "validate")
+	hook := filepath.Join(repo, ".git", "hooks", "pre-commit")
+	// The hook kills Bandmaster (the parent of git), leaving its durable journal
+	// behind while git may finish the commit without recording its SHA.
+	writeFile(t, hook, "#!/bin/sh\nkill -9 $(ps -o ppid= -p \"$PPID\" | tr -d ' ')\n")
+	if err := os.Chmod(hook, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_ = runBandmaster(t, repo, "batch", "commit", "--json")
+	failed := runBandmaster(t, repo, "batch", "commit", "--json")
+	if failed.exitCode != 4 || !strings.Contains(failed.stdout, "integrity") {
+		t.Fatalf("unknown interrupted finalization state was not quarantined: exit=%d stdout=%s", failed.exitCode, failed.stdout)
+	}
+	if session := successfulSessionCommand(t, repo, "inspect"); session.Result.Status != "paused" {
+		t.Fatalf("unknown interrupted finalization did not pause the session: %+v", session.Result)
+	}
+}
+
 func TestCommitBatchIncludesAndAuditsStagedClaimHookChange(t *testing.T) {
 	repo := repositoryWithValidation(t, "")
 	successfulSessionCommand(t, repo, "start")

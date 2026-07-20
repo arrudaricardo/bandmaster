@@ -2,6 +2,8 @@ package project
 
 import (
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -35,6 +37,11 @@ func (p *Project) CommitBatch() (Batch, *Error) {
 	if status != "finalizing" {
 		return Batch{}, invalidSession(session.ID, "batch_not_validated", fmt.Sprintf("Batch %s cannot commit from %s state.", batchID, status))
 	}
+	if recovered, projectError := p.recoverInterruptedFinalization(db, session, batchID); projectError != nil {
+		return Batch{}, projectError
+	} else if recovered {
+		return Batch{}, invalidSession(session.ID, "finalization_recovered", "Interrupted finalization was rolled back; repair and validate the batch before retrying.")
+	}
 	if observations, scanError := p.scanRepository(db, session); scanError != nil {
 		return Batch{}, scanError
 	} else if len(observations) != 0 {
@@ -56,8 +63,14 @@ func (p *Project) CommitBatch() (Batch, *Error) {
 	if err != nil {
 		return Batch{}, sessionInternal(session.ID, "read pre-finalization commit", err)
 	}
+	if projectError := recordFinalizationJournal(db, session.ID, batchID, branch, preBatchCommit, members); projectError != nil {
+		return Batch{}, projectError
+	}
 	if projectError := beginFinalization(db, session.ID, batchID); projectError != nil {
 		return Batch{}, projectError
+	}
+	if projectError := updateFinalizationJournalStep(db, session.ID, batchID, "committing"); projectError != nil {
+		return Batch{}, p.rollbackFinalization(db, session, batchID, branch, preBatchCommit, projectError)
 	}
 	for _, member := range members {
 		if !member.changed {
@@ -81,6 +94,9 @@ func (p *Project) CommitBatch() (Batch, *Error) {
 	} else if output != "" {
 		return Batch{}, p.rollbackFinalization(db, session, batchID, branch, preBatchCommit, invalidSession(session.ID, "finalization_dirty_worktree", "Task commits left Git-visible changes in the worktree or index."))
 	}
+	if projectError := updateFinalizationJournalStep(db, session.ID, batchID, "validating"); projectError != nil {
+		return Batch{}, p.rollbackFinalization(db, session, batchID, branch, preBatchCommit, projectError)
+	}
 	if projectError := p.runFinalValidation(db, session, batchID); projectError != nil {
 		return Batch{}, p.rollbackFinalization(db, session, batchID, branch, preBatchCommit, projectError)
 	}
@@ -96,6 +112,82 @@ func (p *Project) CommitBatch() (Batch, *Error) {
 // rollbackFinalization preserves every observed worktree edit while returning the
 // branch and index to their pre-finalization state. A failed preservation is an
 // ambiguous rollback, so it quarantines rather than offering unsafe repair.
+type finalizationJournal struct {
+	Branch, PreBatchCommit string
+}
+
+// recoverInterruptedFinalization accepts only a journaled branch and a HEAD that
+// is either the pre-batch commit or the final recorded task commit. It rolls the
+// known state back rather than guessing whether a partially completed batch is safe.
+func (p *Project) recoverInterruptedFinalization(db *sql.DB, session Session, batchID string) (bool, *Error) {
+	var journal finalizationJournal
+	err := db.QueryRow(`SELECT expected_branch, pre_batch_commit FROM finalization_journals WHERE batch_id = ? AND session_id = ?`, batchID, session.ID).Scan(&journal.Branch, &journal.PreBatchCommit)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, sessionInternal(session.ID, "read finalization journal", err)
+	}
+	branch, branchErr := gitOutput(p.Root, "branch", "--show-current")
+	head, headErr := gitOutput(p.Root, "rev-parse", "HEAD")
+	index, indexErr := gitOutput(p.Root, "diff", "--cached", "--name-only")
+	if branchErr != nil || headErr != nil || branch != journal.Branch {
+		return false, p.quarantineFinalization(db, session, batchID, "verify interrupted finalization branch", fmt.Errorf("branch=%q head=%q", branch, head))
+	}
+	if indexErr != nil || index != "" {
+		return false, p.quarantineFinalization(db, session, batchID, "verify interrupted finalization index", fmt.Errorf("staged paths %q", index))
+	}
+	monitor, monitorError := inspectLatestMonitor(db, session.ID)
+	if monitorError != nil || !monitorHealthy(monitor, time.Now().UTC()) {
+		return false, p.quarantineFinalization(db, session, batchID, "verify interrupted finalization monitor", fmt.Errorf("monitor is not provably healthy: %v", monitorError))
+	}
+	rows, err := db.Query(`SELECT committed.commit_sha FROM task_commits committed JOIN tasks task ON task.id = committed.task_id WHERE committed.batch_id = ? ORDER BY task.creation_order`, batchID)
+	if err != nil {
+		return false, sessionInternal(session.ID, "read journaled task commits", err)
+	}
+	var commits []string
+	for rows.Next() {
+		var commit string
+		if err := rows.Scan(&commit); err != nil {
+			rows.Close()
+			return false, sessionInternal(session.ID, "read journaled task commit", err)
+		}
+		commits = append(commits, commit)
+	}
+	if err := rows.Close(); err != nil {
+		return false, sessionInternal(session.ID, "close journaled task commits", err)
+	}
+	if head != journal.PreBatchCommit && (len(commits) == 0 || head != commits[len(commits)-1]) {
+		return false, p.quarantineFinalization(db, session, batchID, "verify interrupted finalization HEAD", fmt.Errorf("unexpected HEAD %s", head))
+	}
+	cause := invalidSession(session.ID, "finalization_interrupted", "A previous finalization process stopped before completion.")
+	return true, p.rollbackFinalization(db, session, batchID, journal.Branch, journal.PreBatchCommit, cause)
+}
+
+func recordFinalizationJournal(db *sql.DB, sessionID, batchID, branch, preBatchCommit string, members []finalizationMember) *Error {
+	plan := make([]string, 0, len(members))
+	for _, member := range members {
+		plan = append(plan, member.id)
+	}
+	encodedPlan, err := json.Marshal(plan)
+	if err != nil {
+		return sessionInternal(sessionID, "encode finalization commit plan", err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.Exec(`INSERT INTO finalization_journals(batch_id, session_id, expected_branch, pre_batch_commit, commit_plan_json, step, created_at, updated_at) VALUES(?, ?, ?, ?, ?, 'prepared', ?, ?)`, batchID, sessionID, branch, preBatchCommit, encodedPlan, now, now); err != nil {
+		return sessionInternal(sessionID, "record finalization journal", err)
+	}
+	return nil
+}
+
+func updateFinalizationJournalStep(db *sql.DB, sessionID, batchID, step string) *Error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.Exec(`UPDATE finalization_journals SET step = ?, updated_at = ? WHERE batch_id = ? AND session_id = ?`, step, now, batchID, sessionID); err != nil {
+		return sessionInternal(sessionID, "update finalization journal", err)
+	}
+	return nil
+}
+
 func (p *Project) rollbackFinalization(db *sql.DB, session Session, batchID, branch, preBatchCommit string, cause *Error) *Error {
 	failureStatus, statusErr := gitOutput(p.Root, "status", "--porcelain=v1")
 	if statusErr != nil {
@@ -136,8 +228,14 @@ func (p *Project) rollbackFinalization(db *sql.DB, session Session, batchID, bra
 		return sessionInternal(session.ID, "begin finalization failure recovery", err)
 	}
 	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM task_commits WHERE batch_id = ?`, batchID); err != nil {
+		return sessionInternal(session.ID, "clear rolled-back task commits", err)
+	}
 	if _, err := tx.Exec(`UPDATE batches SET status = 'repair_pending', updated_at = ? WHERE id = ? AND status IN ('finalizing', 'final_validating')`, now, batchID); err != nil {
 		return sessionInternal(session.ID, "mark finalization repair pending", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM finalization_journals WHERE batch_id = ?`, batchID); err != nil {
+		return sessionInternal(session.ID, "clear finalization journal", err)
 	}
 	if _, err := tx.Exec(`UPDATE sessions SET status = 'active', updated_at = ? WHERE id = ? AND status = 'finalizing'`, now, session.ID); err != nil {
 		return sessionInternal(session.ID, "return failed finalization session to active", err)
@@ -461,6 +559,9 @@ func (p *Project) completeFinalization(db *sql.DB, sessionID, batchID string) *E
 	}
 	if _, err := tx.Exec(`INSERT INTO batch_audit_events(session_id, batch_id, event, from_status, to_status, occurred_at) VALUES(?, ?, 'batch_committed', 'final_validating', 'committed', ?)`, sessionID, batchID, now); err != nil {
 		return sessionInternal(sessionID, "audit committed batch", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM finalization_journals WHERE batch_id = ?`, batchID); err != nil {
+		return sessionInternal(sessionID, "clear completed finalization journal", err)
 	}
 	if _, err := tx.Exec(`UPDATE sessions SET status = 'active', starting_commit = ?, updated_at = ? WHERE id = ? AND status = 'finalizing'`, commit, now, sessionID); err != nil {
 		return sessionInternal(sessionID, "return session to active", err)

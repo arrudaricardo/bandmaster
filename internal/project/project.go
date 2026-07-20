@@ -825,6 +825,16 @@ func (p *Project) openState() (*sql.DB, *Error) {
 			PRIMARY KEY(batch_id, attempt, command_order),
 			FOREIGN KEY(batch_id, attempt) REFERENCES batch_validation_attempts(batch_id, attempt)
 		)`,
+		`CREATE TABLE IF NOT EXISTS finalization_journals (
+			batch_id TEXT PRIMARY KEY REFERENCES batches(id),
+			session_id TEXT NOT NULL REFERENCES sessions(id),
+			expected_branch TEXT NOT NULL,
+			pre_batch_commit TEXT NOT NULL,
+			commit_plan_json TEXT NOT NULL,
+			step TEXT NOT NULL CHECK (step IN ('prepared', 'committing', 'validating')),
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
 		`CREATE TABLE IF NOT EXISTS task_commits (
 			batch_id TEXT NOT NULL REFERENCES batches(id),
 			task_id TEXT NOT NULL REFERENCES tasks(id),
