@@ -396,7 +396,7 @@ func successfulTaskCommand(t *testing.T, repo, action string, args ...string) ta
 		t.Fatalf("task %s exit code = %d, stdout = %s, stderr = %s", action, result.exitCode, result.stdout, result.stderr)
 	}
 	response := decodeTaskResponse(t, result.stdout)
-	if !response.Success || response.Command != "task "+action {
+	if !response.Success || response.SchemaVersion != "1" || response.Command != "task "+action {
 		t.Fatalf("unexpected task %s response: %+v", action, response)
 	}
 	return response
@@ -417,7 +417,7 @@ func assertTaskError(t *testing.T, result commandResult, wantExit int, wantCode 
 		t.Fatalf("task command exit code = %d, want %d; stdout = %s; stderr = %s", result.exitCode, wantExit, result.stdout, result.stderr)
 	}
 	response := decodeTaskResponse(t, result.stdout)
-	if response.Success || response.Error.Code != wantCode || response.Error.Retryable != wantRetryable {
+	if response.Success || response.SchemaVersion != "1" || response.Error.Code != wantCode || response.Error.Retryable != wantRetryable {
 		t.Fatalf("task command error = %+v, want code %q retryable %t", response, wantCode, wantRetryable)
 	}
 	return response

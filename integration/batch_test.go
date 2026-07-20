@@ -266,7 +266,7 @@ func successfulBatchCommand(t *testing.T, repo, action string, args ...string) b
 		t.Fatalf("batch %s exit code = %d, stdout = %s, stderr = %s", action, result.exitCode, result.stdout, result.stderr)
 	}
 	response := decodeBatchResponse(t, result.stdout)
-	if !response.Success || response.Command != "batch "+action {
+	if !response.Success || response.SchemaVersion != "1" || response.Command != "batch "+action {
 		t.Fatalf("unexpected batch %s response: %+v", action, response)
 	}
 	return response
@@ -278,7 +278,7 @@ func assertBatchError(t *testing.T, result commandResult, wantExit int, wantCode
 		t.Fatalf("batch command exit code = %d, want %d; stdout = %s; stderr = %s", result.exitCode, wantExit, result.stdout, result.stderr)
 	}
 	response := decodeBatchResponse(t, result.stdout)
-	if response.Success || response.Error.Code != wantCode || response.Error.Retryable != wantRetryable {
+	if response.Success || response.SchemaVersion != "1" || response.Error.Code != wantCode || response.Error.Retryable != wantRetryable {
 		t.Fatalf("batch command error = %+v, want code %q retryable %t", response, wantCode, wantRetryable)
 	}
 	return response

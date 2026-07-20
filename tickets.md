@@ -216,6 +216,6 @@ Work the **frontier**: any ticket whose blockers are all done. Several branches 
 - [ ] All eighteen acceptance scenarios from the source PRD pass in temporary Git repositories and the Codex-driven project.
 - [x] Platform-sensitive path aliases, Unicode behavior, executable bits, notifications, process liveness, and hook behavior run on both macOS and Linux.
 - [x] Release binaries and installation through standard Go distribution produce consistent CLI behavior.
-- [ ] Stable JSON compatibility, typed errors, retryability, and distinct exit classes are verified across the complete workflow.
+- [x] Stable JSON compatibility, typed errors, retryability, and distinct exit classes are verified across the complete workflow.
 - [ ] Tests assert public CLI and Git-visible behavior rather than private SQLite layouts, transition helpers, or Git subprocess choreography.
 - [ ] Any lower test seam is limited to deterministic clock, monitor-event, process, Git, hook, or crash fault injection and still asserts public state outcomes.

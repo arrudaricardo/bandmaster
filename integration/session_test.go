@@ -487,7 +487,7 @@ func successfulSessionCommand(t *testing.T, repo, action string) sessionResponse
 		t.Fatalf("session %s exit code = %d, stdout = %s, stderr = %s", action, result.exitCode, result.stdout, result.stderr)
 	}
 	response := decodeSessionResponse(t, result.stdout)
-	if !response.Success || response.Command != "session "+action {
+	if !response.Success || response.SchemaVersion != "1" || response.Command != "session "+action {
 		t.Fatalf("unexpected session %s response: %+v", action, response)
 	}
 	return response
@@ -500,7 +500,7 @@ func assertSessionError(t *testing.T, repo, action, wantCode string) sessionResp
 		t.Fatalf("session %s exit code = %d, want 3; stdout = %s; stderr = %s", action, result.exitCode, result.stdout, result.stderr)
 	}
 	response := decodeSessionResponse(t, result.stdout)
-	if response.Success || response.Error.Code != wantCode || response.Error.Retryable {
+	if response.Success || response.SchemaVersion != "1" || response.Error.Code != wantCode || response.Error.Retryable {
 		t.Fatalf("session %s error = %+v, want non-retryable %q", action, response, wantCode)
 	}
 	return response
