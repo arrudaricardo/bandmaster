@@ -188,11 +188,11 @@ Work the **frontier**: any ticket whose blockers are all done. Several branches 
 
 **Blocked by:** Coordinate concurrent claims and worker leases; Detect and quarantine repository integrity drift.
 
-- [ ] Abort enters an explicit aborting state and stops all workers before claims can be cleared.
-- [ ] Worker termination is proven through parent-held handles or explicit audited user confirmation; ambiguous workers remain quarantined.
-- [ ] Safe claims are cleared only after termination while all uncommitted Git-visible changes remain in the working tree.
-- [ ] Task ownership, structured handoffs, recovery decisions, and audit events remain inspectable after abort.
-- [ ] A new session is rejected until the preserved working tree is made clean.
+- [x] Abort enters an explicit aborting state and stops all workers before claims can be cleared.
+- [x] Worker termination is proven through parent-held handles or explicit audited user confirmation; ambiguous workers remain quarantined.
+- [x] Safe claims are cleared only after termination while all uncommitted Git-visible changes remain in the working tree.
+- [x] Task ownership, structured handoffs, recovery decisions, and audit events remain inspectable after abort.
+- [x] A new session is rejected until the preserved working tree is made clean.
 
 ## Drive Bandmaster through the generated Codex skill
 

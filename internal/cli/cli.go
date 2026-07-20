@@ -42,7 +42,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	jsonOutput, args := extractJSONFlag(args)
 	command := commandName(args)
 	if command == "" {
-		return writeError(stdout, stderr, jsonOutput, "unknown", "invalid_arguments", "usage: bandmaster version | init | config status | config approve <digest> | session <start|inspect|pause|resume|finish> | integrity recover --confirmation <text> | batch <freeze|validate|commit|inspect> [batch-id] | task <create|list|inspect|assign|replan|cancel|requeue|recover|repair|preflight|claim|release|heartbeat|diff|submit> [--json]", false, exitInvalid)
+		return writeError(stdout, stderr, jsonOutput, "unknown", "invalid_arguments", "usage: bandmaster version | init | config status | config approve <digest> | session <start|inspect|pause|resume|finish|abort> [--termination-confirmation <text>] | integrity recover --confirmation <text> | batch <freeze|validate|commit|inspect> [batch-id] | task <create|list|inspect|assign|replan|cancel|requeue|recover|repair|preflight|claim|release|heartbeat|diff|submit> [--json]", false, exitInvalid)
 	}
 	if command == "version" {
 		result := versionResult{
@@ -126,6 +126,16 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return writeSession(stdout, jsonOutput, command, result)
 	case "session pause", "session resume", "session finish":
 		result, projectError := currentProject.TransitionSession(args[1])
+		if projectError != nil {
+			return writeProjectError(stdout, stderr, jsonOutput, command, projectError)
+		}
+		return writeSession(stdout, jsonOutput, command, result)
+	case "session abort":
+		options, optionError := parseTaskOptions(args[2:], map[string]bool{"--termination-confirmation": true})
+		if optionError != nil {
+			return writeError(stdout, stderr, jsonOutput, command, "invalid_arguments", optionError.Error(), false, exitInvalid)
+		}
+		result, projectError := currentProject.AbortSession(oneOption(options, "--termination-confirmation"))
 		if projectError != nil {
 			return writeProjectError(stdout, stderr, jsonOutput, command, projectError)
 		}
@@ -384,6 +394,8 @@ func commandName(args []string) string {
 		return "config approve"
 	case len(args) == 2 && args[0] == "session" && (args[1] == "start" || args[1] == "inspect" || args[1] == "pause" || args[1] == "resume" || args[1] == "finish"):
 		return "session " + args[1]
+	case len(args) >= 2 && args[0] == "session" && args[1] == "abort":
+		return "session " + args[1]
 	case len(args) >= 2 && args[0] == "integrity" && args[1] == "recover":
 		return "integrity recover"
 	case len(args) == 2 && args[0] == "batch" && args[1] == "freeze":
@@ -423,7 +435,7 @@ func commandName(args []string) string {
 
 func mutatingCommand(command string) bool {
 	switch command {
-	case "init", "config approve", "session pause", "session finish", "batch freeze", "batch validate", "batch commit", "batch finalize",
+	case "init", "config approve", "session pause", "session finish", "session abort", "batch freeze", "batch validate", "batch commit", "batch finalize",
 		"task create", "task assign", "task replan", "task cancel", "task requeue", "task recover", "task repair",
 		"task preflight", "task claim", "task release", "task heartbeat", "task diff", "task submit":
 		return true

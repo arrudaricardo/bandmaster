@@ -78,7 +78,7 @@ func (p *Project) PrepareMutation(command string) *Error {
 		if !errors.Is(err, sql.ErrNoRows) {
 			return sessionInternal(session.ID, "read unresolved integrity violation", err)
 		}
-		if command == "session pause" || command == "session finish" {
+		if command == "session pause" || command == "session finish" || command == "session abort" {
 			return nil
 		}
 		return invalidSession(session.ID, "session_not_active", fmt.Sprintf("Session %s is paused and has no healthy integrity monitor.", session.ID))

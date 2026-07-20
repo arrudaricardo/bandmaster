@@ -634,6 +634,11 @@ func (p *Project) openState() (*sql.DB, *Error) {
 			full_scan_at TEXT NOT NULL,
 			monitor_stopped_at TEXT NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS session_abort_events (
+			session_id TEXT PRIMARY KEY REFERENCES sessions(id),
+			termination_confirmation TEXT NOT NULL,
+			occurred_at TEXT NOT NULL
+		)`,
 		`CREATE TABLE IF NOT EXISTS integrity_quarantines (
 			violation_id INTEGER NOT NULL REFERENCES integrity_violations(id),
 			task_id TEXT REFERENCES tasks(id),

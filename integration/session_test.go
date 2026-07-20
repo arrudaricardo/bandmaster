@@ -125,6 +125,58 @@ func TestClaimlessSessionCanPauseResumeAndFinish(t *testing.T) {
 	}
 }
 
+func TestSessionAbortPreservesEditsAndRequiresTerminationConfirmation(t *testing.T) {
+	repo := approvedCleanRepository(t)
+	successfulSessionCommand(t, repo, "start")
+	task := successfulTaskCommand(t, repo, "create", "--title", "Abort work", "--intent", "Preserve edits", "--expected-outcome", "Quarantine ownership")
+	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "abort-worker")
+	successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "owned.txt")
+	writeFile(t, filepath.Join(repo, "owned.txt"), "preserved work\n")
+
+	waiting := runBandmaster(t, repo, "session", "abort", "--json")
+	if waiting.exitCode != 3 {
+		t.Fatalf("abort without proof exit code = %d: %s", waiting.exitCode, waiting.stdout)
+	}
+	if response := decodeSessionResponse(t, waiting.stdout); response.Error.Code != "worker_termination_confirmation_required" {
+		t.Fatalf("unexpected abort proof error: %+v", response)
+	}
+	if session := successfulSessionCommand(t, repo, "inspect"); session.Result.Status != "aborting" {
+		t.Fatalf("abort did not enter aborting: %+v", session.Result)
+	}
+
+	abortResult := runBandmaster(t, repo, "session", "abort", "--termination-confirmation", "worker handle exited", "--json")
+	if abortResult.exitCode != 0 {
+		t.Fatalf("confirmed abort failed: %+v", abortResult)
+	}
+	aborted := decodeSessionResponse(t, abortResult.stdout)
+	if aborted.Result.Status != "aborted" {
+		t.Fatalf("unexpected aborted session: %+v", aborted.Result)
+	}
+	if content := readFile(t, filepath.Join(repo, "owned.txt")); content != "preserved work\n" {
+		t.Fatalf("abort discarded edits: %q", content)
+	}
+	inspectedTask := successfulTaskCommand(t, repo, "inspect", task.Result.ID)
+	if inspectedTask.Result.Status != "quarantined" || len(inspectedTask.Result.Claims) != 0 {
+		t.Fatalf("abort did not retain quarantined ownership history and clear claims: %+v", inspectedTask.Result)
+	}
+	if started := runBandmaster(t, repo, "session", "start", "--json"); started.exitCode != 3 || !strings.Contains(started.stdout, "working_tree_not_clean") {
+		t.Fatalf("new session accepted preserved work: %+v", started)
+	}
+	runGit(t, repo, "clean", "-fd")
+	if restarted := successfulSessionCommand(t, repo, "start"); restarted.Result.Status != "active" {
+		t.Fatalf("cleaned repository did not admit a new session: %+v", restarted.Result)
+	}
+}
+
+func TestSessionAbortWithoutWorkersCompletesImmediately(t *testing.T) {
+	repo := approvedCleanRepository(t)
+	successfulSessionCommand(t, repo, "start")
+	aborted := successfulSessionCommand(t, repo, "abort")
+	if aborted.Result.Status != "aborted" {
+		t.Fatalf("claimless abort = %+v", aborted.Result)
+	}
+}
+
 func TestIllegalSessionTransitionDoesNotChangeDurableState(t *testing.T) {
 	repo := approvedCleanRepository(t)
 	successfulSessionCommand(t, repo, "start")
