@@ -200,12 +200,12 @@ Work the **frontier**: any ticket whose blockers are all done. Several branches 
 
 **Blocked by:** Repair failures without changing ownership; Advance dependent batches and complete a session; Abort active work without losing edits.
 
-- [ ] The generated skill invokes Bandmaster only when at least two tasks are independently implementable and testable.
-- [ ] The parent remains the sole orchestrator, starts all currently unblocked workers, and never delegates agent-spawning authority.
-- [ ] Workers use stable JSON commands and tokens, claim before writing, heartbeat, avoid Git mutation, review their diffs, submit handoffs, and stop editing.
-- [ ] The parent requeues blocked workers, waits for barriers, diagnoses validation failures, and assigns repairs to original owners.
-- [ ] Interrupted sessions are reported with an offer to resume instead of silently starting new workers.
-- [ ] Lost worker handles preserve quarantine and require explicit user confirmation before replacement.
+- [x] The generated skill invokes Bandmaster only when at least two tasks are independently implementable and testable.
+- [x] The parent remains the sole orchestrator, starts all currently unblocked workers, and never delegates agent-spawning authority.
+- [x] Workers use stable JSON commands and tokens, claim before writing, heartbeat, avoid Git mutation, review their diffs, submit handoffs, and stop editing.
+- [x] The parent requeues blocked workers, waits for barriers, diagnoses validation failures, and assigns repairs to original owners.
+- [x] Interrupted sessions are reported with an offer to resume instead of silently starting new workers.
+- [x] Lost worker handles preserve quarantine and require explicit user confirmation before replacement.
 
 ## Prove MVP acceptance across supported platforms
 

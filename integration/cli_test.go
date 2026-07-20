@@ -271,7 +271,19 @@ func TestInitPreservesProjectConfigAndOverwritesGeneratedSkill(t *testing.T) {
 		t.Fatalf("init replaced existing project configuration:\n%s", got)
 	}
 	skill := readFile(t, skillPath)
-	for _, expected := range []string{"name: bandmaster", "bandmaster config status --json", "bandmaster config approve <digest> --json"} {
+	for _, expected := range []string{
+		"name: bandmaster",
+		"at least **two** tasks are independently implementable",
+		"parent Codex agent is the sole orchestrator",
+		"do not start workers or a replacement session automatically",
+		"bandmaster task claim <task-id> --token <token>",
+		"bandmaster task heartbeat <task-id> --token <token>",
+		"It must not run Git mutations",
+		"bandmaster task submit <task-id> --token <token>",
+		"bandmaster task requeue <task-id> --json",
+		"bandmaster task repair",
+		"Never infer termination from a missing handle",
+	} {
 		if !strings.Contains(skill, expected) {
 			t.Errorf("generated skill does not contain %q:\n%s", expected, skill)
 		}
