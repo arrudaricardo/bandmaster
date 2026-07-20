@@ -48,6 +48,14 @@ func (p *Project) CommitBatch() (Batch, *Error) {
 	if projectError != nil {
 		return Batch{}, projectError
 	}
+	branch, err := gitOutput(p.Root, "branch", "--show-current")
+	if err != nil {
+		return Batch{}, sessionInternal(session.ID, "read finalization branch", err)
+	}
+	preBatchCommit, err := gitOutput(p.Root, "rev-parse", "HEAD")
+	if err != nil {
+		return Batch{}, sessionInternal(session.ID, "read pre-finalization commit", err)
+	}
 	if projectError := beginFinalization(db, session.ID, batchID); projectError != nil {
 		return Batch{}, projectError
 	}
@@ -57,27 +65,82 @@ func (p *Project) CommitBatch() (Batch, *Error) {
 		}
 		sha, projectError := p.commitTask(session, batchID, member)
 		if projectError != nil {
-			return Batch{}, projectError
+			return Batch{}, p.rollbackFinalization(db, session, batchID, branch, preBatchCommit, projectError)
 		}
 		if projectError := recordTaskCommit(db, session.ID, batchID, member.id, sha); projectError != nil {
-			return Batch{}, projectError
+			return Batch{}, p.rollbackFinalization(db, session, batchID, branch, preBatchCommit, projectError)
 		}
 	}
 	if output, err := gitOutput(p.Root, "status", "--porcelain=v1"); err != nil {
 		return Batch{}, sessionInternal(session.ID, "verify committed worktree", err)
 	} else if output != "" {
-		return Batch{}, invalidSession(session.ID, "finalization_dirty_worktree", "Task commits left Git-visible changes in the worktree or index.")
+		return Batch{}, p.rollbackFinalization(db, session, batchID, branch, preBatchCommit, invalidSession(session.ID, "finalization_dirty_worktree", "Task commits left Git-visible changes in the worktree or index."))
 	}
 	if projectError := p.runFinalValidation(db, session, batchID); projectError != nil {
-		return Batch{}, projectError
+		return Batch{}, p.rollbackFinalization(db, session, batchID, branch, preBatchCommit, projectError)
 	}
 	if projectError := p.completeFinalization(db, session.ID, batchID); projectError != nil {
-		return Batch{}, projectError
+		return Batch{}, p.rollbackFinalization(db, session, batchID, branch, preBatchCommit, projectError)
 	}
 	if projectError := p.StartIntegrityMonitor(session.ID); projectError != nil {
 		return Batch{}, projectError
 	}
 	return inspectBatch(db, batchID)
+}
+
+// rollbackFinalization preserves every observed worktree edit while returning the
+// branch and index to their pre-finalization state. A failed preservation is an
+// ambiguous rollback, so it quarantines rather than offering unsafe repair.
+func (p *Project) rollbackFinalization(db *sql.DB, session Session, batchID, branch, preBatchCommit string, cause *Error) *Error {
+	stashOutput, stashErr := gitOutput(p.Root, "stash", "push", "--include-untracked", "-m", "bandmaster finalization rollback")
+	if stashErr != nil {
+		return p.quarantineFinalization(db, session, batchID, "capture finalization edits", stashErr)
+	}
+	stashed := !strings.Contains(stashOutput, "No local changes to save")
+	if _, err := gitOutput(p.Root, "checkout", "--force", branch); err != nil {
+		return p.quarantineFinalization(db, session, batchID, "restore finalization branch", err)
+	}
+	if _, err := gitOutput(p.Root, "reset", "--hard", preBatchCommit); err != nil {
+		return p.quarantineFinalization(db, session, batchID, "restore pre-finalization commit", err)
+	}
+	if stashed {
+		if _, err := gitOutput(p.Root, "stash", "pop"); err != nil {
+			return p.quarantineFinalization(db, session, batchID, "restore finalization edits", err)
+		}
+	}
+	if index, err := gitOutput(p.Root, "diff", "--cached", "--name-only"); err != nil || index != "" {
+		if err == nil {
+			err = fmt.Errorf("restored index contains %q", index)
+		}
+		return p.quarantineFinalization(db, session, batchID, "verify restored index", err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	tx, err := db.Begin()
+	if err != nil {
+		return sessionInternal(session.ID, "begin finalization failure recovery", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE batches SET status = 'repair_pending', updated_at = ? WHERE id = ? AND status IN ('finalizing', 'final_validating')`, now, batchID); err != nil {
+		return sessionInternal(session.ID, "mark finalization repair pending", err)
+	}
+	if _, err := tx.Exec(`UPDATE sessions SET status = 'active', updated_at = ? WHERE id = ? AND status = 'finalizing'`, now, session.ID); err != nil {
+		return sessionInternal(session.ID, "return failed finalization session to active", err)
+	}
+	if _, err := tx.Exec(`INSERT INTO batch_audit_events(session_id, batch_id, event, from_status, to_status, occurred_at) VALUES(?, ?, 'finalization_rolled_back', 'finalizing', 'repair_pending', ?)`, session.ID, batchID, now); err != nil {
+		return sessionInternal(session.ID, "audit finalization rollback", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return sessionInternal(session.ID, "commit finalization failure recovery", err)
+	}
+	return invalidSession(session.ID, "finalization_failed", fmt.Sprintf("Finalization was rolled back: %s", cause.Message))
+}
+
+func (p *Project) quarantineFinalization(db *sql.DB, session Session, batchID, operation string, cause error) *Error {
+	observation := integrityObservation{Kind: "ambiguous_finalization_rollback", Path: ".git", BatchID: batchID, ObservedState: map[string]string{"operation": operation, "error": cause.Error()}}
+	if projectError := p.persistIntegrityViolations(session, []integrityObservation{observation}); projectError != nil {
+		return projectError
+	}
+	return integrityError(session.ID, observation)
 }
 
 type finalizationMember struct {
@@ -171,6 +234,18 @@ func (p *Project) commitTask(session Session, batchID string, member finalizatio
 	if err != nil || actualParent != parent {
 		return "", invalidSession(session.ID, "commit_parent_mismatch", "Task commit did not advance HEAD by exactly one expected commit.")
 	}
+	if branch, err := gitOutput(p.Root, "branch", "--show-current"); err != nil || branch != session.StartingBranch {
+		return "", invalidSession(session.ID, "commit_branch_mismatch", "Task commit changed the finalization branch.")
+	}
+	if message, err := gitOutput(p.Root, "log", "-1", "--format=%B", "HEAD"); err != nil || message != deterministicCommitMessage(member) {
+		return "", invalidSession(session.ID, "commit_message_mismatch", "Task commit message differs from the deterministic Bandmaster message.")
+	}
+	if index, err := gitOutput(p.Root, "diff", "--cached", "--name-only"); err != nil || index != "" {
+		return "", invalidSession(session.ID, "commit_index_mismatch", "Task commit left staged changes in the index.")
+	}
+	if dirty, err := gitOutput(p.Root, append([]string{"diff", "--name-only", "--"}, member.paths...)...); err != nil || dirty != "" {
+		return "", invalidSession(session.ID, "commit_claim_dirty", "Task commit left claimed changes unstaged or dirty.")
+	}
 	committed, err := gitOutput(p.Root, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD")
 	if err != nil {
 		return "", sessionInternal(session.ID, "inspect task commit paths", err)
@@ -215,7 +290,30 @@ func (p *Project) runFinalValidation(db *sql.DB, session Session, batchID string
 		return projectError
 	}
 	for index, command := range commands {
+		if status, err := gitOutput(p.Root, "status", "--porcelain=v1"); err != nil {
+			return sessionInternal(session.ID, "inspect final validation worktree", err)
+		} else if status != "" {
+			observation := integrityObservation{Kind: "final_validation_dirty_worktree", Path: ".", BatchID: batchID, ObservedState: map[string]string{"status": status}}
+			if projectError := p.persistIntegrityViolations(session, []integrityObservation{observation}); projectError != nil {
+				return projectError
+			}
+			return integrityError(session.ID, observation)
+		}
 		run := p.runOfficialValidationCommand(attempt, int64(index+1), command)
+		if status, err := gitOutput(p.Root, "status", "--porcelain=v1"); err != nil {
+			return sessionInternal(session.ID, "inspect final validation worktree", err)
+		} else if status != "" {
+			run.Status = "integrity_violation"
+			if projectError := persistValidationRun(db, session.ID, batchID, run); projectError != nil {
+				return projectError
+			}
+			_ = finishValidationAttempt(db, session.ID, batchID, attempt, "integrity_violation")
+			observation := integrityObservation{Kind: "final_validation_mutation", Path: ".", BatchID: batchID, ObservedState: map[string]string{"status": status}}
+			if projectError := p.persistIntegrityViolations(session, []integrityObservation{observation}); projectError != nil {
+				return projectError
+			}
+			return integrityError(session.ID, observation)
+		}
 		if projectError := persistValidationRun(db, session.ID, batchID, run); projectError != nil {
 			return projectError
 		}

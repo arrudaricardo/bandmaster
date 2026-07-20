@@ -1,6 +1,7 @@
 package integration_test
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -40,5 +41,41 @@ func TestCommitBatchCreatesOrderedTaskCommitsAndCompletesNoOps(t *testing.T) {
 	}
 	if retried := successfulBatchCommand(t, repo, "commit"); retried.Result.ID != frozen.Result.ID || retried.Result.Status != "committed" {
 		t.Fatalf("committed batch was not idempotent: %+v", retried.Result)
+	}
+}
+
+func TestCommitBatchRollsBackHookFailureAndPreservesEdits(t *testing.T) {
+	repo := repositoryWithValidation(t, "")
+	started := successfulSessionCommand(t, repo, "start")
+	task := successfulTaskCommand(t, repo, "create", "--title", "Change owned", "--intent", "Make the fixture change", "--expected-outcome", "Owned content changes")
+	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "hook-worker")
+	successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "owned.txt")
+	writeFile(t, filepath.Join(repo, "owned.txt"), "preserved content\n")
+	submitBatchTask(t, repo, task.Result.ID, assignment.Result.AssignmentToken)
+	successfulBatchCommand(t, repo, "freeze")
+	successfulBatchCommand(t, repo, "validate")
+	hook := filepath.Join(repo, ".git", "hooks", "pre-commit")
+	writeFile(t, hook, "#!/bin/sh\nprintf hook-change > hook-outside.txt\nexit 1\n")
+	if err := os.Chmod(hook, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	failed := runBandmaster(t, repo, "batch", "commit", "--json")
+	if failed.exitCode == 0 || !strings.Contains(failed.stdout, "finalization") {
+		t.Fatalf("hook failure was accepted: exit=%d stdout=%s", failed.exitCode, failed.stdout)
+	}
+	if head := strings.TrimSpace(runGit(t, repo, "rev-parse", "HEAD")); head != started.Result.StartingCommit {
+		t.Fatalf("failed finalization changed HEAD: %s", head)
+	}
+	if content := readFile(t, filepath.Join(repo, "owned.txt")); content != "preserved content\n" {
+		t.Fatalf("owned edit was not restored: %q", content)
+	}
+	if content := readFile(t, filepath.Join(repo, "hook-outside.txt")); content != "hook-change" {
+		t.Fatalf("hook edit was not restored: %q", content)
+	}
+	if index := strings.TrimSpace(runGit(t, repo, "diff", "--cached", "--name-only")); index != "" {
+		t.Fatalf("rollback left a staged index: %s", index)
+	}
+	if batch := successfulBatchCommand(t, repo, "inspect"); batch.Result.Status != "repair_pending" {
+		t.Fatalf("ordinary hook failure did not enter repair pending: %+v", batch.Result)
 	}
 }
