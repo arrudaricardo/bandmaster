@@ -1,0 +1,11 @@
+version: 1
+worker_lease_duration: 5m
+validation:
+  commands:
+    - name: go-test
+      argv:
+        - go
+        - test
+        - ./...
+      working_directory: .
+      timeout: 10m
