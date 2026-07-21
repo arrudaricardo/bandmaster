@@ -97,6 +97,15 @@ func (p *Project) PrepareMutation(command string) *Error {
 		return projectError
 	}
 	if projectError != nil || !monitorHealthy(monitor, time.Now().UTC()) {
+		if command == "session pause" {
+			latest, inspectError := inspectOpenSessionWithQueryer(db)
+			if inspectError == nil && latest.ID == session.ID && latest.Status == "paused" {
+				return nil
+			}
+			if inspectError != nil && inspectError.Code != "session_not_active" {
+				return inspectError
+			}
+		}
 		observation := integrityObservation{Kind: "monitor_unhealthy", Path: ".git/bandmaster/monitor", ObservedState: map[string]any{"monitor": monitor}}
 		if projectError := p.persistIntegrityViolations(session, []integrityObservation{observation}); projectError != nil {
 			return projectError

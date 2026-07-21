@@ -223,7 +223,7 @@ func TestConcurrentDuplicateSessionTransitionIsIdempotent(t *testing.T) {
 	repo := approvedCleanRepository(t)
 	started := successfulSessionCommand(t, repo, "start")
 
-	const processCount = 8
+	const processCount = 64
 	start := make(chan struct{})
 	results := make(chan concurrentCommandResult, processCount)
 	var workers sync.WaitGroup
