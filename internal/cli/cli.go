@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/bandmaster-dev/bandmaster/internal/project"
+	"github.com/bandmaster-dev/bandmaster/internal/tui"
 )
 
 const (
@@ -42,7 +43,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	jsonOutput, args := extractJSONFlag(args)
 	command := commandName(args)
 	if command == "" {
-		return writeError(stdout, stderr, jsonOutput, "unknown", "invalid_arguments", "usage: bandmaster version | init | config status | config approve <digest> | session <start|inspect|pause|resume|finish|abort> [--termination-confirmation <text>] | integrity recover --confirmation <text> | batch <freeze|validate|commit|inspect> [batch-id] | task <create|list|inspect|assign|replan|cancel|requeue|recover|repair|preflight|claim|release|heartbeat|diff|submit> [--json]", false, exitInvalid)
+		return writeError(stdout, stderr, jsonOutput, "unknown", "invalid_arguments", "usage: bandmaster version | tui | init | config status | config approve <digest> | session <start|inspect|pause|resume|finish|abort> [--termination-confirmation <text>] | integrity recover --confirmation <text> | batch <freeze|validate|commit|inspect> [batch-id] | task <create|list|inspect|assign|replan|cancel|requeue|recover|repair|preflight|claim|release|heartbeat|diff|submit> [--json]", false, exitInvalid)
 	}
 	if command == "version" {
 		result := versionResult{
@@ -67,6 +68,15 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	if command == "monitor run" {
 		if projectError := currentProject.RunIntegrityMonitor(args[2], args[3]); projectError != nil {
 			return projectError.ExitCode
+		}
+		return 0
+	}
+	if command == "tui" {
+		if jsonOutput {
+			return writeError(stdout, stderr, true, command, "invalid_arguments", "The interactive TUI does not support --json.", false, exitInvalid)
+		}
+		if err := tui.Run(currentProject, os.Stdin, stdout); err != nil {
+			return writeError(stdout, stderr, false, command, "tui_failed", fmt.Sprintf("Run interactive TUI: %v", err), false, exitInternal)
 		}
 		return 0
 	}
@@ -388,6 +398,8 @@ func commandName(args []string) string {
 		return "version"
 	case len(args) == 1 && args[0] == "init":
 		return "init"
+	case len(args) == 1 && args[0] == "tui":
+		return "tui"
 	case len(args) == 2 && args[0] == "config" && args[1] == "status":
 		return "config status"
 	case len(args) == 3 && args[0] == "config" && args[1] == "approve":

@@ -58,6 +58,9 @@ bandmaster config approve <digest>
 
 # Commit the generated project files, then start a clean session
 bandmaster session start
+
+# Open the live, read-only status dashboard (q to quit, r to refresh)
+bandmaster tui
 ```
 
 `init` writes `.bandmaster.yaml` and installs `.agents/skills/bandmaster/SKILL.md`. The configuration is intentionally unapproved at first: review the validation commands before authorizing them. Approval is local to the clone and invalidates whenever the configuration changes.
@@ -154,6 +157,14 @@ Bandmaster's generated skill is designed for a **single parent orchestrator** an
 6. Lost worker handles require parent-held termination proof or explicit audited user confirmation before replacement.
 
 The generated instructions live at `.agents/skills/bandmaster/SKILL.md` after initialization.
+
+## Live status dashboard
+
+Run `bandmaster tui` from the project to see the current session, monitor health, integrity alerts, task-state counts, and active task ownership in one terminal view. The dashboard is read-only and refreshes every two seconds; press `r` for an immediate refresh or `q` to exit.
+
+```sh
+bandmaster tui
+```
 
 ## Session operations
 

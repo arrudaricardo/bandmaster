@@ -87,6 +87,29 @@ func TestInitGeneratesUnapprovedConfigAndCodexSkill(t *testing.T) {
 	}
 }
 
+func TestTUIRejectsJSONModeWithStableError(t *testing.T) {
+	repo := newGitRepository(t)
+	result := runBandmaster(t, repo, "tui", "--json")
+	if result.exitCode != 3 {
+		t.Fatalf("tui JSON exit code = %d, want 3; stdout = %s", result.exitCode, result.stdout)
+	}
+	var response struct {
+		SchemaVersion string `json:"schema_version"`
+		Command       string `json:"command"`
+		Success       bool   `json:"success"`
+		Error         struct {
+			Code      string `json:"code"`
+			Retryable bool   `json:"retryable"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(result.stdout), &response); err != nil {
+		t.Fatalf("decode TUI JSON rejection: %v\n%s", err, result.stdout)
+	}
+	if response.SchemaVersion != "1" || response.Command != "tui" || response.Success || response.Error.Code != "invalid_arguments" || response.Error.Retryable {
+		t.Fatalf("unexpected TUI JSON rejection: %+v", response)
+	}
+}
+
 func TestVersionProvidesHumanAndVersionedJSONOutput(t *testing.T) {
 	directory := t.TempDir()
 	human := runBandmaster(t, directory, "version")
