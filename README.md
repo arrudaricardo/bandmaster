@@ -217,6 +217,15 @@ go test ./... -timeout 30m
 go build ./cmd/bandmaster
 ```
 
+For a live development dashboard, install [Air](https://github.com/cosmtrek/air) and run it from the repository root:
+
+```sh
+go install github.com/air-verse/air@v1.61.7
+air
+```
+
+Air rebuilds the CLI whenever a Go file changes and relaunches the live `bandmaster tui` dashboard. The generated binary lives in the ignored `.air/` directory and is removed when Air exits. Press `Ctrl+C` to stop Air. If `air` is not on your `PATH`, add `$(go env GOPATH)/bin`.
+
 CI exercises the CLI integration suite on macOS and Linux, verifies installation through Go, and cross-compiles Darwin ARM64 and Linux AMD64 binaries.
 
 ## Releases
