@@ -9,6 +9,7 @@
 </p>
 
 <p align="center">
+  <a href="#built-with-codex-and-gpt-56">Built with Codex</a> ·
   <a href="#why-bandmaster">Why Bandmaster</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="#how-it-works">How it works</a> ·
@@ -21,6 +22,14 @@
 Parallel coding agents are fast—until two agents edit the same file, a worker disappears mid-task, or an unreviewed diff lands in Git. **Bandmaster makes shared-working-tree parallelism deliberate.** It gives one parent agent a durable plan, exact file ownership, worker leases, batch barriers, validation, and attributable commits.
 
 Bandmaster is a local Go CLI. It keeps its runtime state under Git metadata, creates no remote branches, and never pushes.
+
+## Built with Codex and GPT-5.6
+
+Bandmaster grew out of using GPT-5.6 in Codex to spawn and manage parallel coding agents. The model proved remarkably capable at breaking work into independent tasks, delegating those tasks, and coordinating workers. The missing piece was a durable orchestration layer: agents still needed a reliable way to declare ownership, communicate progress, preserve context, validate their combined work, and recover safely from interruptions.
+
+Git worktrees can provide isolation, but they are not always practical. A new worktree may be missing local environment variables, compete for development-server ports, duplicate dependencies and other resource-heavy state, and require cleanup afterward. Bandmaster explores a different approach: let agents address multiple issues concurrently on the same branch and in the same working tree, with explicit file claims and Git-aware safety barriers.
+
+Codex was used throughout Bandmaster's development as both the parent orchestrator and the source of specialized worker agents. Bandmaster was also used to improve Bandmaster itself: agents planned changes, claimed files, submitted structured handoffs, ran through batch validation, and produced attributable commits using the tool they were building. That dogfooding loop shaped the CLI, generated skill, recovery model, and agent-facing JSON contract.
 
 ## Why Bandmaster
 
