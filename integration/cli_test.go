@@ -82,8 +82,13 @@ func TestInitGeneratesUnapprovedConfigAndCodexSkill(t *testing.T) {
 	}
 
 	skill := readFile(t, filepath.Join(repo, ".agents", "skills", "bandmaster", "SKILL.md"))
-	if !strings.Contains(skill, "name: bandmaster") || !strings.Contains(skill, "bandmaster") {
-		t.Fatalf("unexpected generated skill:\n%s", skill)
+	for _, expected := range []string{"name: bandmaster", "including a single task", "truly trivial change"} {
+		if !strings.Contains(skill, expected) {
+			t.Errorf("generated skill does not contain %q:\n%s", expected, skill)
+		}
+	}
+	if strings.Contains(skill, "only when at least **two** tasks") {
+		t.Fatalf("generated skill retained the multi-task-only policy:\n%s", skill)
 	}
 }
 
