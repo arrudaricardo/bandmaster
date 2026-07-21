@@ -322,7 +322,8 @@ func TestInitPreservesProjectConfigAndOverwritesGeneratedSkill(t *testing.T) {
 	skill := readFile(t, skillPath)
 	for _, expected := range []string{
 		"name: bandmaster",
-		"at least **two** tasks are independently implementable",
+		"including a single task",
+		"truly trivial change",
 		"parent Codex agent is the sole orchestrator",
 		"do not start workers or a replacement session automatically",
 		"bandmaster task claim <task-id> --token <token>",
@@ -600,9 +601,9 @@ func TestInitRejectsFilesystemAliasesOfNestedGitMetadata(t *testing.T) {
 
 	probe := exec.Command("git", "rev-parse", "--show-toplevel")
 	probe.Dir = nested
-	_, aliasErr := probe.Output()
+	resolvedRoot, aliasErr := probe.Output()
 	result := runBandmaster(t, repo, "init", "--json")
-	if aliasErr == nil {
+	if aliasErr == nil && filepath.Clean(strings.TrimSpace(string(resolvedRoot))) == nested {
 		if result.exitCode != 3 {
 			t.Fatalf("nested metadata alias exit code = %d, want 3; stdout = %s; stderr = %s", result.exitCode, result.stdout, result.stderr)
 		}
@@ -681,6 +682,8 @@ func newGitRepository(t *testing.T) string {
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, output)
 	}
+	runGit(t, repo, "config", "user.name", "Bandmaster Tests")
+	runGit(t, repo, "config", "user.email", "bandmaster@example.invalid")
 	t.Cleanup(func() {
 		// Stop any session monitor before TempDir removes its SQLite state.
 		pause := exec.Command(bandmasterBinary, "session", "pause", "--json")
