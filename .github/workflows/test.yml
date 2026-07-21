@@ -18,10 +18,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      # The CLI integration harness deliberately exercises long-lived monitor
-      # processes and real Git repositories; the default ten-minute Go package
-      # timeout is too short for the full acceptance suite.
-      - run: go test ./... -timeout 30m
+      # The shared SQLite compilation cache keeps the full CLI acceptance suite
+      # below five minutes while still exercising real monitor processes and Git repositories.
+      - run: go test ./... -timeout 5m
 
   distribution:
     needs: test

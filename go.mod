@@ -6,6 +6,7 @@ require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/ncruces/go-sqlite3 v0.17.0
+	github.com/tetratelabs/wazero v1.7.3
 	golang.org/x/sys v0.37.0
 	golang.org/x/text v0.16.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -28,6 +29,5 @@ require (
 	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/ncruces/julianday v1.0.0 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
-	github.com/tetratelabs/wazero v1.7.3 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 )

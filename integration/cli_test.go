@@ -144,6 +144,61 @@ func TestVersionProvidesHumanAndVersionedJSONOutput(t *testing.T) {
 	}
 }
 
+func TestStateCommandsPopulateAndTolerateSQLiteCompilationCache(t *testing.T) {
+	t.Run("persistent cache", func(t *testing.T) {
+		repo := newGitRepository(t)
+		writeFile(t, filepath.Join(repo, "go.mod"), "module example.com/cache-test\n\ngo 1.24\n")
+		writeFile(t, filepath.Join(repo, "project.go"), "package cachetest\n")
+		cacheRoot := t.TempDir()
+		environment, cacheDir := isolatedUserCache(cacheRoot)
+
+		initialized := runBandmasterWithEnvironment(t, repo, environment, "init", "--json")
+		if initialized.exitCode != 0 {
+			t.Fatalf("init with compilation cache exit = %d, stdout=%s stderr=%s", initialized.exitCode, initialized.stdout, initialized.stderr)
+		}
+		var cachedArtifact bool
+		if err := filepath.WalkDir(cacheDir, func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if !entry.IsDir() {
+				cachedArtifact = true
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("inspect compilation cache: %v", err)
+		}
+		if !cachedArtifact {
+			t.Fatalf("state command did not populate compilation cache under %s", cacheDir)
+		}
+
+		status := runBandmasterWithEnvironment(t, repo, environment, "config", "status", "--json")
+		if status.exitCode != 0 {
+			t.Fatalf("reuse compilation cache exit = %d, stdout=%s stderr=%s", status.exitCode, status.stdout, status.stderr)
+		}
+	})
+
+	t.Run("cache unavailable", func(t *testing.T) {
+		repo := newGitRepository(t)
+		cacheRoot := filepath.Join(t.TempDir(), "not-a-directory")
+		writeFile(t, cacheRoot, "blocking file\n")
+		environment, _ := isolatedUserCache(cacheRoot)
+
+		result := runBandmasterWithEnvironment(t, repo, environment, "init", "--json")
+		if result.exitCode != 0 {
+			t.Fatalf("unavailable compilation cache blocked command: exit=%d stdout=%s stderr=%s", result.exitCode, result.stdout, result.stderr)
+		}
+	})
+}
+
+func isolatedUserCache(root string) ([]string, string) {
+	environment := []string{"HOME=" + root, "XDG_CACHE_HOME=" + root, "LOCALAPPDATA=" + root}
+	if runtime.GOOS == "darwin" {
+		return environment, filepath.Join(root, "Library", "Caches", "bandmaster", "wazero")
+	}
+	return environment, filepath.Join(root, "bandmaster", "wazero")
+}
+
 func TestPrettyJSONOutputRequiresJSONAndUsesIndentation(t *testing.T) {
 	directory := t.TempDir()
 	pretty := runBandmaster(t, directory, "version", "--json", "--pretty")
@@ -599,11 +654,9 @@ func TestInitRejectsFilesystemAliasesOfNestedGitMetadata(t *testing.T) {
 		t.Fatalf("rename nested metadata with alternate spelling: %v", err)
 	}
 
-	probe := exec.Command("git", "rev-parse", "--show-toplevel")
-	probe.Dir = nested
-	resolvedRoot, aliasErr := probe.Output()
+	_, aliasErr := os.Lstat(filepath.Join(nested, ".git"))
 	result := runBandmaster(t, repo, "init", "--json")
-	if aliasErr == nil && filepath.Clean(strings.TrimSpace(string(resolvedRoot))) == nested {
+	if aliasErr == nil {
 		if result.exitCode != 3 {
 			t.Fatalf("nested metadata alias exit code = %d, want 3; stdout = %s; stderr = %s", result.exitCode, result.stdout, result.stderr)
 		}
@@ -619,6 +672,9 @@ func TestInitRejectsFilesystemAliasesOfNestedGitMetadata(t *testing.T) {
 			t.Fatalf("nested metadata alias error = %q, want unsupported_nested_repository", response.Error.Code)
 		}
 		return
+	}
+	if !errors.Is(aliasErr, os.ErrNotExist) {
+		t.Fatalf("inspect nested metadata alias: %v", aliasErr)
 	}
 	if result.exitCode != 0 {
 		t.Fatalf("distinct .GIT directory should not be treated as Git metadata: exit=%d stdout=%s stderr=%s", result.exitCode, result.stdout, result.stderr)
