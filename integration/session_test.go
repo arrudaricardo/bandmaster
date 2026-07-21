@@ -458,6 +458,8 @@ func approvedCleanRepository(t *testing.T) string {
 	t.Helper()
 	repo := newGitRepository(t)
 	writeFile(t, repo+"/go.mod", "module example.com/project\n\ngo 1.24\n")
+	// init detects `go test ./...`; it needs a real package to validate successfully.
+	writeFile(t, repo+"/project.go", "package project\n")
 	initialized := runBandmaster(t, repo, "init", "--json")
 	if initialized.exitCode != 0 {
 		t.Fatalf("init exit code = %d, stdout = %s, stderr = %s", initialized.exitCode, initialized.stdout, initialized.stderr)
