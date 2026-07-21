@@ -176,6 +176,12 @@ func TestStateCommandsPopulateAndTolerateSQLiteCompilationCache(t *testing.T) {
 		if status.exitCode != 0 {
 			t.Fatalf("reuse compilation cache exit = %d, stdout=%s stderr=%s", status.exitCode, status.stdout, status.stderr)
 		}
+
+		secondRepo := newGitRepository(t)
+		secondInit := runBandmasterWithEnvironment(t, secondRepo, environment, "init", "--json")
+		if secondInit.exitCode != 0 {
+			t.Fatalf("reuse compilation cache for write exit = %d, stdout=%s stderr=%s", secondInit.exitCode, secondInit.stdout, secondInit.stderr)
+		}
 	})
 
 	t.Run("cache unavailable", func(t *testing.T) {
