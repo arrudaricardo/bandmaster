@@ -349,6 +349,9 @@ func TestClaimExpansionReleaseAndBlockedTaskRequeuePreserveOwnership(t *testing.
 	if released.Result.Status != "editing" || len(released.Result.Claims) != 2 || released.Result.Claims[0].Path != "owned.txt" || released.Result.Claims[1].Path != "expanded.txt" {
 		t.Fatalf("unchanged claim was not released independently: %+v", released.Result)
 	}
+	if len(released.Result.OwnershipEvidence) != 3 || released.Result.OwnershipEvidence[1].Path != "unused.txt" {
+		t.Fatalf("claim release discarded immutable ownership evidence: %+v", released.Result.OwnershipEvidence)
+	}
 
 	blockedTask := successfulTaskCommand(t, repo, "create", "--title", "Wait for busy path", "--intent", "Retry after release", "--expected-outcome", "Requeue succeeds")
 	blockedAssignment := successfulTaskCommand(t, repo, "assign", blockedTask.Result.ID, "--worker", "worker-blocked")

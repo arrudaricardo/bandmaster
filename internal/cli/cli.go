@@ -27,7 +27,16 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		stdout = prettyJSONOutput{Writer: stdout}
 	}
 	if command == "" {
-		return writeError(stdout, stderr, jsonOutput, "unknown", "invalid_arguments", "usage: bandmaster version | tui | init | config status | config approve <digest> | session <start|inspect|pause|resume|finish|abort> [--termination-confirmation <text>] | integrity recover --confirmation <text> | batch <freeze|validate|commit|inspect> [batch-id] | task <create|list|inspect|assign|replan|cancel|requeue|recover|repair|preflight|claim|release|heartbeat|diff|submit> [--json [--pretty]]", false, exitInvalid)
+		return writeError(stdout, stderr, jsonOutput, "unknown", "invalid_arguments", "usage: bandmaster version | doctor | tui | init | config status | config approve <digest> | session <start|inspect|pause|resume|finish|abort> [--dry-run] [--termination-confirmation <text>] | integrity recover --confirmation <text> | finalization recover [--confirmation <text>] | batch <freeze|validate|commit|inspect|abandon> [--reason <text> --confirmation <text>] | task <create|list|inspect|assign|replan|cancel|requeue|recover|repair|preflight|claim|release|heartbeat|diff|submit> [--json [--pretty]]", false, exitInvalid)
+	}
+	abortConfirmation := ""
+	abortDryRun := false
+	if command == "session abort" {
+		var optionError error
+		abortConfirmation, abortDryRun, optionError = parseAbortOptions(args[2:])
+		if optionError != nil {
+			return writeError(stdout, stderr, jsonOutput, command, "invalid_arguments", optionError.Error(), false, exitInvalid)
+		}
 	}
 	if command == "version" {
 		result := versionResult{
@@ -64,13 +73,25 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
-	if mutatingCommand(command) {
+	if mutatingCommand(command) && !abortDryRun {
 		if projectError := currentProject.PrepareMutation(command); projectError != nil {
 			return writeProjectError(stdout, stderr, jsonOutput, command, projectError)
 		}
 	}
 
 	switch command {
+	case "doctor":
+		result, projectError := currentProject.Doctor()
+		if projectError != nil {
+			return writeProjectError(stdout, stderr, jsonOutput, command, projectError)
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope{SchemaVersion: "1", Command: command, Success: true, Result: result})
+		}
+		if result.Healthy {
+			return writeHuman(stdout, "Bandmaster state is healthy.\n")
+		}
+		return writeHuman(stdout, "Bandmaster found %d recovery issue(s); rerun with --json for structured evidence.\n", len(result.Findings))
 	case "init":
 		result, projectError := currentProject.Initialize()
 		if projectError != nil {
@@ -125,11 +146,17 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		}
 		return writeSession(stdout, jsonOutput, command, result)
 	case "session abort":
-		options, optionError := parseTaskOptions(args[2:], map[string]bool{"--termination-confirmation": true})
-		if optionError != nil {
-			return writeError(stdout, stderr, jsonOutput, command, "invalid_arguments", optionError.Error(), false, exitInvalid)
+		if abortDryRun {
+			result, projectError := currentProject.PlanAbort(abortConfirmation)
+			if projectError != nil {
+				return writeProjectError(stdout, stderr, jsonOutput, command, projectError)
+			}
+			if jsonOutput {
+				return writeJSON(stdout, envelope{SchemaVersion: "1", Command: command, Success: true, SessionID: result.SessionID, Result: result})
+			}
+			return writeHuman(stdout, "Abort plan for session %s: %d task(s), %d active claim(s), %d blocker(s).\n", result.SessionID, len(result.AffectedTasks), len(result.ActiveClaims), len(result.Blockers))
 		}
-		result, projectError := currentProject.AbortSession(oneOption(options, "--termination-confirmation"))
+		result, projectError := currentProject.AbortSession(abortConfirmation)
 		if projectError != nil {
 			return writeProjectError(stdout, stderr, jsonOutput, command, projectError)
 		}
@@ -144,6 +171,19 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			return writeProjectError(stdout, stderr, jsonOutput, command, projectError)
 		}
 		return writeSession(stdout, jsonOutput, command, result)
+	case "finalization recover":
+		options, optionError := parseTaskOptions(args[2:], map[string]bool{"--confirmation": true})
+		if optionError != nil {
+			return writeError(stdout, stderr, jsonOutput, command, "invalid_arguments", optionError.Error(), false, exitInvalid)
+		}
+		result, projectError := currentProject.RecoverFinalization(oneOption(options, "--confirmation"))
+		if projectError != nil {
+			return writeProjectError(stdout, stderr, jsonOutput, command, projectError)
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope{SchemaVersion: "1", Command: command, Success: true, SessionID: result.SessionID, Result: result})
+		}
+		return writeHuman(stdout, "Finalization recovery for batch %s: %s (%s).\n", result.BatchID, result.Action, result.Outcome)
 	case "batch freeze":
 		result, projectError := currentProject.FreezeBatch()
 		if projectError != nil {
@@ -162,6 +202,19 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			return writeProjectError(stdout, stderr, jsonOutput, command, projectError)
 		}
 		return writeBatch(stdout, jsonOutput, command, result)
+	case "batch abandon":
+		options, optionError := parseTaskOptions(args[2:], map[string]bool{"--reason": true, "--confirmation": true})
+		if optionError != nil {
+			return writeError(stdout, stderr, jsonOutput, command, "invalid_arguments", optionError.Error(), false, exitInvalid)
+		}
+		result, projectError := currentProject.AbandonBatch(oneOption(options, "--reason"), oneOption(options, "--confirmation"))
+		if projectError != nil {
+			return writeProjectError(stdout, stderr, jsonOutput, command, projectError)
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope{SchemaVersion: "1", Command: command, Success: true, SessionID: result.SessionID, Result: result})
+		}
+		return writeHuman(stdout, "Batch %s is abandoned.\nNext action: %s.\n", result.BatchID, result.NextAction)
 	case "batch inspect":
 		batchID := ""
 		if len(args) == 3 {

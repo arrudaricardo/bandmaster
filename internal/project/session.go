@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
-	"strings"
 	"time"
 )
 
@@ -93,103 +92,6 @@ func (p *Project) StartSession() (Session, *Error) {
 		return Session{}, projectError
 	}
 	return p.inspectSession(db, id)
-}
-
-// AbortSession preserves working-tree edits while ending orchestration. Since this
-// CLI has no parent-held worker handles, clearing claims requires an explicit,
-// durable user confirmation that every assigned worker has stopped.
-func (p *Project) AbortSession(terminationConfirmation string) (Session, *Error) {
-	db, projectError := p.openState()
-	if projectError != nil {
-		return Session{}, projectError
-	}
-	defer db.Close()
-	current, projectError := p.inspectOpenSession(db)
-	if projectError != nil {
-		return Session{}, projectError
-	}
-	if current.Status == "finalizing" {
-		return Session{}, invalidSession(current.ID, "session_finalizing", "A finalizing session must recover or finish before it can be aborted.")
-	}
-	if current.Status != "active" && current.Status != "paused" && current.Status != "aborting" {
-		return Session{}, invalidSession(current.ID, "invalid_session_transition", fmt.Sprintf("Cannot abort a session in %s state.", current.Status))
-	}
-	if current.Status != "aborting" {
-		now := time.Now().UTC().Format(time.RFC3339Nano)
-		if _, err := db.Exec(`UPDATE sessions SET status = 'aborting', updated_at = ? WHERE id = ? AND status IN ('active', 'paused')`, now, current.ID); err != nil {
-			return Session{}, sessionInternal(current.ID, "begin abort", err)
-		}
-		if _, err := db.Exec(`INSERT INTO audit_events(session_id, event, from_status, to_status, occurred_at) VALUES(?, 'session_aborting', ?, 'aborting', ?)`, current.ID, current.Status, now); err != nil {
-			return Session{}, sessionInternal(current.ID, "audit abort", err)
-		}
-	}
-	if projectError := p.StopIntegrityMonitor(current.ID); projectError != nil {
-		return Session{}, projectError
-	}
-	var workers int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM tasks WHERE session_id = ? AND status NOT IN ('committed', 'no_op', 'canceled') AND worker_identity IS NOT NULL`, current.ID).Scan(&workers); err != nil {
-		return Session{}, sessionInternal(current.ID, "inspect abort workers", err)
-	}
-	if workers != 0 && strings.TrimSpace(terminationConfirmation) == "" {
-		now := time.Now().UTC().Format(time.RFC3339Nano)
-		if _, err := db.Exec(`INSERT INTO task_audit_events(session_id, task_id, event, from_status, to_status, worker_identity, occurred_at) SELECT session_id, id, 'abort_termination_unproven', status, 'quarantined', worker_identity, ? FROM tasks WHERE session_id = ? AND status NOT IN ('committed', 'no_op', 'canceled', 'quarantined') AND worker_identity IS NOT NULL`, now, current.ID); err != nil {
-			return Session{}, sessionInternal(current.ID, "audit unproven abort workers", err)
-		}
-		if _, err := db.Exec(`UPDATE tasks SET status = 'quarantined', updated_at = ? WHERE session_id = ? AND status NOT IN ('committed', 'no_op', 'canceled', 'quarantined') AND worker_identity IS NOT NULL`, now, current.ID); err != nil {
-			return Session{}, sessionInternal(current.ID, "quarantine unproven abort workers", err)
-		}
-		return Session{}, invalidSession(current.ID, "worker_termination_confirmation_required", "Abort is waiting for proof that assigned workers have stopped; provide --termination-confirmation.")
-	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	tx, err := db.Begin()
-	if err != nil {
-		return Session{}, sessionInternal(current.ID, "begin abort cleanup", err)
-	}
-	defer tx.Rollback()
-	rows, err := tx.Query(`SELECT id, status, COALESCE(worker_identity, '') FROM tasks WHERE session_id = ? AND status NOT IN ('committed', 'no_op', 'canceled')`, current.ID)
-	if err != nil {
-		return Session{}, sessionInternal(current.ID, "inspect abort tasks", err)
-	}
-	defer rows.Close()
-	type abortTask struct{ id, status, worker string }
-	var tasks []abortTask
-	for rows.Next() {
-		var task abortTask
-		if err := rows.Scan(&task.id, &task.status, &task.worker); err != nil {
-			return Session{}, sessionInternal(current.ID, "read abort task", err)
-		}
-		tasks = append(tasks, task)
-	}
-	if err := rows.Err(); err != nil {
-		return Session{}, sessionInternal(current.ID, "read abort tasks", err)
-	}
-	for _, task := range tasks {
-		if task.status == "quarantined" {
-			continue
-		}
-		if _, err := tx.Exec(`UPDATE tasks SET status = 'quarantined', updated_at = ? WHERE id = ?`, now, task.id); err != nil {
-			return Session{}, sessionInternal(current.ID, "quarantine aborted task", err)
-		}
-		if _, err := tx.Exec(`INSERT INTO task_audit_events(session_id, task_id, event, from_status, to_status, worker_identity, termination_proof, occurred_at) VALUES(?, ?, 'session_aborted', ?, 'quarantined', ?, ?, ?)`, current.ID, task.id, task.status, nullableString(task.worker), nullableString(terminationConfirmation), now); err != nil {
-			return Session{}, sessionInternal(current.ID, "audit aborted task", err)
-		}
-	}
-	if _, err := tx.Exec(`DELETE FROM claims WHERE session_id = ?`, current.ID); err != nil {
-		return Session{}, sessionInternal(current.ID, "clear aborted claims", err)
-	}
-	if _, err := tx.Exec(`INSERT INTO session_abort_events(session_id, termination_confirmation, occurred_at) VALUES(?, ?, ?)`, current.ID, terminationConfirmation, now); err != nil {
-		return Session{}, sessionInternal(current.ID, "record abort confirmation", err)
-	}
-	if _, err := tx.Exec(`UPDATE sessions SET status = 'aborted', updated_at = ? WHERE id = ? AND status = 'aborting'`, now, current.ID); err != nil {
-		return Session{}, sessionInternal(current.ID, "complete abort", err)
-	}
-	if _, err := tx.Exec(`INSERT INTO audit_events(session_id, event, from_status, to_status, occurred_at) VALUES(?, 'session_aborted', 'aborting', 'aborted', ?)`, current.ID, now); err != nil {
-		return Session{}, sessionInternal(current.ID, "audit completed abort", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return Session{}, sessionInternal(current.ID, "commit abort", err)
-	}
-	return p.inspectSession(db, current.ID)
 }
 
 func (p *Project) InspectSession() (Session, *Error) {

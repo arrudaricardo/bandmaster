@@ -19,15 +19,25 @@ func (p *Project) RecoverIntegrity(confirmation string) (Session, *Error) {
 	if projectError != nil {
 		return Session{}, projectError
 	}
-	if session.Status != "paused" {
-		return Session{}, invalidSession(session.ID, "integrity_recovery_requires_paused_session", "Integrity recovery requires a paused session.")
-	}
 	var unresolved int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM integrity_violations WHERE session_id = ? AND recovered_at IS NULL`, session.ID).Scan(&unresolved); err != nil {
 		return Session{}, sessionInternal(session.ID, "inspect unresolved integrity violations", err)
 	}
 	if unresolved == 0 {
+		var recovered int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM integrity_violations WHERE session_id = ? AND recovered_at IS NOT NULL`, session.ID).Scan(&recovered); err != nil {
+			return Session{}, sessionInternal(session.ID, "inspect recovered integrity violations", err)
+		}
+		if recovered != 0 {
+			if projectError := validateSessionBatchPair(db, session); projectError != nil {
+				return Session{}, projectError
+			}
+			return p.inspectSession(db, session.ID)
+		}
 		return Session{}, invalidSession(session.ID, "no_integrity_violation", "The paused session has no unresolved integrity violation.")
+	}
+	if session.Status != "paused" {
+		return Session{}, invalidSession(session.ID, "integrity_recovery_requires_paused_session", "Integrity recovery requires a paused session.")
 	}
 	observations, projectError := p.scanRepository(db, session)
 	if projectError != nil {
@@ -80,7 +90,20 @@ func (p *Project) RecoverIntegrity(confirmation string) (Session, *Error) {
 		return Session{}, sessionInternal(session.ID, "close integrity quarantines", err)
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	restoreFinalizing := false
+	restoredSessionStatus := "paused"
+	for _, current := range quarantines {
+		if !current.batchID.Valid {
+			continue
+		}
+		targetSession, _, ok := recoveryTransition(current.previousState)
+		if !ok {
+			return Session{}, invalidSession(session.ID, "unsupported_recovery_state", "The quarantined batch's previous state cannot be recovered safely.")
+		}
+		if restoredSessionStatus != "paused" && restoredSessionStatus != targetSession {
+			return Session{}, invalidSession(session.ID, "incompatible_recovery_states", "Quarantined batches require incompatible restored session states.")
+		}
+		restoredSessionStatus = targetSession
+	}
 	for _, current := range quarantines {
 		if current.taskID.Valid {
 			if _, err := tx.Exec(`UPDATE tasks SET status = ?, updated_at = ? WHERE id = ? AND status = 'quarantined'`, current.previousState, now, current.taskID.String); err != nil {
@@ -91,12 +114,9 @@ func (p *Project) RecoverIntegrity(confirmation string) (Session, *Error) {
 			}
 		}
 		if current.batchID.Valid {
-			restoredStatus := current.previousState
-			if restoredStatus == "validating" {
-				restoredStatus = "frozen"
-			}
-			if restoredStatus == "frozen" {
-				restoreFinalizing = true
+			_, restoredStatus, ok := recoveryTransition(current.previousState)
+			if !ok {
+				return Session{}, invalidSession(session.ID, "unsupported_recovery_state", "The quarantined batch's previous state cannot be recovered safely.")
 			}
 			if _, err := tx.Exec(`UPDATE batches SET status = ?, updated_at = ? WHERE id = ? AND status = 'quarantined'`, restoredStatus, now, current.batchID.String); err != nil {
 				return Session{}, sessionInternal(session.ID, "restore batch after integrity recovery", err)
@@ -109,11 +129,9 @@ func (p *Project) RecoverIntegrity(confirmation string) (Session, *Error) {
 	if _, err := tx.Exec(`UPDATE integrity_violations SET recovered_at = ?, recovery_confirmation = ? WHERE session_id = ? AND recovered_at IS NULL`, now, confirmation, session.ID); err != nil {
 		return Session{}, sessionInternal(session.ID, "resolve integrity violations", err)
 	}
-	restoredSessionStatus := "paused"
-	if restoreFinalizing {
-		restoredSessionStatus = "finalizing"
-		if _, err := tx.Exec(`UPDATE sessions SET status = 'finalizing', updated_at = ? WHERE id = ? AND status = 'paused'`, now, session.ID); err != nil {
-			return Session{}, sessionInternal(session.ID, "restore batch finalization after integrity recovery", err)
+	if restoredSessionStatus != "paused" {
+		if _, err := tx.Exec(`UPDATE sessions SET status = ?, updated_at = ? WHERE id = ? AND status = 'paused'`, restoredSessionStatus, now, session.ID); err != nil {
+			return Session{}, sessionInternal(session.ID, "restore compatible session after integrity recovery", err)
 		}
 	}
 	if _, err := tx.Exec(`INSERT INTO audit_events(session_id, event, from_status, to_status, occurred_at) VALUES(?, 'integrity_recovered', 'paused', ?, ?)`, session.ID, restoredSessionStatus, now); err != nil {
@@ -121,6 +139,11 @@ func (p *Project) RecoverIntegrity(confirmation string) (Session, *Error) {
 	}
 	if err := tx.Commit(); err != nil {
 		return Session{}, sessionInternal(session.ID, "commit integrity recovery", err)
+	}
+	if restoredSessionStatus == "active" {
+		if projectError := p.StartIntegrityMonitor(session.ID); projectError != nil {
+			return Session{}, projectError
+		}
 	}
 	return p.inspectSession(db, session.ID)
 }

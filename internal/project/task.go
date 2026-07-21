@@ -24,6 +24,7 @@ type Task struct {
 	CommitSHA         string              `json:"commit_sha,omitempty"`
 	Lease             *WorkerLease        `json:"lease,omitempty"`
 	Claims            []Claim             `json:"claims"`
+	OwnershipEvidence []OwnershipEvidence `json:"ownership_evidence"`
 	FocusedValidation []FocusedValidation `json:"focused_validation"`
 	Submission        *Submission         `json:"submission,omitempty"`
 	CreatedAt         string              `json:"created_at"`

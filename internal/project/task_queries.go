@@ -104,6 +104,7 @@ func inspectTask(db *sql.DB, sessionID, id string) (Task, *Error) {
 	task.AssignmentToken = assignmentToken.String
 	task.CoreFrozen = coreFrozen != 0
 	task.Claims = []Claim{}
+	task.OwnershipEvidence = []OwnershipEvidence{}
 	task.FocusedValidation = []FocusedValidation{}
 	task.Prerequisites = []string{}
 	rows, err := db.Query(`SELECT prerequisite_id FROM task_dependencies WHERE task_id = ? ORDER BY dependency_order`, id)
@@ -245,6 +246,38 @@ func inspectTask(db *sql.DB, sessionID, id string) (Task, *Error) {
 	}
 	if err := claimRows.Err(); err != nil {
 		return Task{}, sessionInternal(sessionID, "read task claims", err)
+	}
+	ownershipRows, err := db.Query(`
+		SELECT ownership.path, ownership.baseline_presence, ownership.baseline_type, ownership.baseline_content_hash, ownership.baseline_executable,
+			ownership.claimed_at, submitted.presence, submitted.file_type, submitted.content_hash, submitted.executable
+		FROM task_path_ownership ownership
+		LEFT JOIN submitted_snapshots submitted ON submitted.task_id = ownership.task_id AND submitted.path = ownership.path
+		WHERE ownership.task_id = ?
+		ORDER BY ownership.claim_order, ownership.path`, id)
+	if err != nil {
+		return Task{}, sessionInternal(sessionID, "read task ownership evidence", err)
+	}
+	for ownershipRows.Next() {
+		var evidence OwnershipEvidence
+		var baselineHash, submittedPresence, submittedType, submittedHash sql.NullString
+		var baselineExecutable int
+		var submittedExecutable sql.NullInt64
+		if err := ownershipRows.Scan(&evidence.Path, &evidence.Baseline.Presence, &evidence.Baseline.Type, &baselineHash, &baselineExecutable, &evidence.ClaimedAt, &submittedPresence, &submittedType, &submittedHash, &submittedExecutable); err != nil {
+			ownershipRows.Close()
+			return Task{}, sessionInternal(sessionID, "read task ownership evidence", err)
+		}
+		evidence.Baseline.ContentHash = baselineHash.String
+		evidence.Baseline.Executable = baselineExecutable != 0
+		if submittedPresence.Valid {
+			evidence.SubmittedSnapshot = &PathSnapshot{Presence: submittedPresence.String, Type: submittedType.String, ContentHash: submittedHash.String, Executable: submittedExecutable.Int64 != 0}
+		}
+		task.OwnershipEvidence = append(task.OwnershipEvidence, evidence)
+	}
+	if err := ownershipRows.Close(); err != nil {
+		return Task{}, sessionInternal(sessionID, "close task ownership evidence", err)
+	}
+	if err := ownershipRows.Err(); err != nil {
+		return Task{}, sessionInternal(sessionID, "read task ownership evidence", err)
 	}
 	validationRows, err := db.Query(`SELECT name, argv_json, script, working_directory, timeout, environment_json FROM focused_validations WHERE task_id = ? ORDER BY validation_order`, id)
 	if err != nil {

@@ -1,7 +1,9 @@
 package project
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,10 +41,12 @@ func (p *Project) CommitBatch() (Batch, *Error) {
 	if status != "finalizing" {
 		return Batch{}, invalidSession(session.ID, "batch_not_validated", fmt.Sprintf("Batch %s cannot commit from %s state.", batchID, status))
 	}
-	if recovered, projectError := p.recoverInterruptedFinalization(db, session, batchID); projectError != nil {
-		return Batch{}, projectError
-	} else if recovered {
-		return Batch{}, invalidSession(session.ID, "finalization_recovered", "Interrupted finalization was rolled back; repair and validate the batch before retrying.")
+	var interrupted int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM finalization_journals WHERE batch_id = ? AND session_id = ?`, batchID, session.ID).Scan(&interrupted); err != nil {
+		return Batch{}, sessionInternal(session.ID, "inspect interrupted finalization", err)
+	}
+	if interrupted != 0 {
+		return Batch{}, invalidSession(session.ID, "finalization_recovery_required", "Interrupted finalization requires `bandmaster finalization recover --json`; do not reissue batch commit.")
 	}
 	if observations, scanError := p.scanRepository(db, session); scanError != nil {
 		return Batch{}, scanError
@@ -224,52 +228,71 @@ func updateFinalizationJournalStep(db *sql.DB, sessionID, batchID, step string) 
 }
 
 func (p *Project) rollbackFinalization(db *sql.DB, session Session, batchID, branch, preBatchCommit string, cause *Error) *Error {
+	return p.rollbackFinalizationWithRecovery(db, session, batchID, branch, preBatchCommit, cause, nil)
+}
+
+func (p *Project) rollbackFinalizationWithRecovery(db *sql.DB, session Session, batchID, branch, preBatchCommit string, cause *Error, recovery *FinalizationRecoveryResult) *Error {
 	failureStatus, statusErr := gitOutput(p.Root, "status", "--porcelain=v1")
 	if statusErr != nil {
-		return p.quarantineFinalization(db, session, batchID, "capture finalization failure state", statusErr)
+		return p.quarantineFinalizationRollback(db, session, batchID, "capture-failure-state", statusErr, cause)
 	}
 	committedPatchBytes, patchErr := gitBytes(p.Root, "diff", "--binary", preBatchCommit+"..HEAD")
 	if patchErr != nil {
-		return p.quarantineFinalization(db, session, batchID, "capture provisional finalization commits", patchErr)
+		return p.quarantineFinalizationRollback(db, session, batchID, "capture-provisional-commits", patchErr, cause)
 	}
 	committedPatch := string(committedPatchBytes)
 	stashOutput, stashErr := gitOutput(p.Root, "stash", "push", "--include-untracked", "-m", "bandmaster finalization rollback")
 	if stashErr != nil {
-		return p.quarantineFinalization(db, session, batchID, "capture finalization edits", stashErr)
+		return p.quarantineFinalizationRollback(db, session, batchID, "capture-edits", stashErr, cause)
 	}
 	stashed := !strings.Contains(stashOutput, "No local changes to save")
 	if _, err := gitOutput(p.Root, "checkout", "--force", branch); err != nil {
-		return p.quarantineFinalization(db, session, batchID, "restore finalization branch", err)
+		return p.quarantineFinalizationRollback(db, session, batchID, "restore-branch", err, cause)
 	}
 	if _, err := gitOutput(p.Root, "reset", "--hard", preBatchCommit); err != nil {
-		return p.quarantineFinalization(db, session, batchID, "restore pre-finalization commit", err)
+		return p.quarantineFinalizationRollback(db, session, batchID, "restore-head", err, cause)
 	}
 	if committedPatch != "" {
 		patch, err := os.CreateTemp("", "bandmaster-finalization-*.patch")
 		if err != nil {
-			return p.quarantineFinalization(db, session, batchID, "persist provisional finalization commits", err)
+			return p.quarantineFinalizationRollback(db, session, batchID, "persist-provisional-commits", err, cause)
 		}
 		patchName := patch.Name()
 		if _, err := patch.WriteString(committedPatch); err != nil || patch.Close() != nil {
 			_ = os.Remove(patchName)
-			return p.quarantineFinalization(db, session, batchID, "persist provisional finalization commits", err)
+			return p.quarantineFinalizationRollback(db, session, batchID, "persist-provisional-commits", err, cause)
 		}
 		defer os.Remove(patchName)
 		command := exec.Command("git", "-C", p.Root, "apply", "--binary", patchName)
 		if output, err := command.CombinedOutput(); err != nil {
-			return p.quarantineFinalization(db, session, batchID, "restore provisional finalization commits", fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output))))
+			return p.quarantineFinalizationRollback(db, session, batchID, "restore-provisional-commits", fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output))), cause)
 		}
 	}
 	if stashed {
 		if _, err := gitOutput(p.Root, "stash", "pop"); err != nil {
-			return p.quarantineFinalization(db, session, batchID, "restore finalization edits", err)
+			return p.quarantineFinalizationRollback(db, session, batchID, "restore-edits", err, cause)
 		}
+	}
+	// Stash restoration can recreate index entries for additions that were staged
+	// by finalization before it failed. The pre-finalization index is known clean,
+	// so restore it independently from the preserved working-tree contents.
+	if os.Getenv("BANDMASTER_TEST_FAIL_ROLLBACK_AT") == "normalize-index" {
+		return p.quarantineFinalizationRollback(db, session, batchID, "normalize-index", errors.New("injected rollback failure"), cause)
+	}
+	if _, err := gitOutput(p.Root, "reset", "--mixed", preBatchCommit); err != nil {
+		return p.quarantineFinalizationRollback(db, session, batchID, "normalize-index", err, cause)
 	}
 	if index, err := gitOutput(p.Root, "diff", "--cached", "--name-only"); err != nil || index != "" {
 		if err == nil {
 			err = fmt.Errorf("restored index contains %q", index)
 		}
-		return p.quarantineFinalization(db, session, batchID, "verify restored index", err)
+		return p.quarantineFinalizationRollback(db, session, batchID, "verify-index", err, cause)
+	}
+	// Fault injection after every Git restoration invariant has passed proves
+	// that durable recovery can resume from a clean repository even if recording
+	// the rollback outcome itself is interrupted.
+	if os.Getenv("BANDMASTER_TEST_FAIL_ROLLBACK_AT") == "after-normalize-index" {
+		return p.quarantineFinalizationRollback(db, session, batchID, "after-normalize-index", errors.New("injected rollback bookkeeping failure"), cause)
 	}
 	if finalizationCauseIsIntegrity(cause) {
 		observation := integrityObservation{Kind: "finalization_integrity_violation", Path: ".", BatchID: batchID, ObservedState: map[string]string{"cause": cause.Code, "status": failureStatus}}
@@ -299,6 +322,14 @@ func (p *Project) rollbackFinalization(db *sql.DB, session Session, batchID, bra
 	if _, err := tx.Exec(`INSERT INTO batch_audit_events(session_id, batch_id, event, from_status, to_status, occurred_at) VALUES(?, ?, 'finalization_rolled_back', 'finalizing', 'repair_pending', ?)`, session.ID, batchID, now); err != nil {
 		return sessionInternal(session.ID, "audit finalization rollback", err)
 	}
+	if recovery != nil {
+		if projectError := recordFinalizationRecovery(tx, *recovery); projectError != nil {
+			return projectError
+		}
+		if os.Getenv("BANDMASTER_TEST_FAIL_ROLLBACK_AT") == "before-recovery-commit" {
+			return sessionInternal(session.ID, "commit explicit finalization recovery", errors.New("injected recovery audit failure"))
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return sessionInternal(session.ID, "commit finalization failure recovery", err)
 	}
@@ -307,6 +338,25 @@ func (p *Project) rollbackFinalization(db *sql.DB, session Session, batchID, bra
 
 func finalizationCauseIsIntegrity(cause *Error) bool {
 	return cause.Code == "integrity_violation" || cause.Code == "finalization_dirty_worktree" || strings.HasPrefix(cause.Code, "commit_")
+}
+
+func (p *Project) quarantineFinalizationRollback(db *sql.DB, session Session, batchID, operation string, rollbackCause error, initiating *Error) *Error {
+	rollbackError := &RollbackErrorDetail{Operation: operation, Message: rollbackCause.Error()}
+	evidence := struct {
+		InitiatingError *ErrorDetail         `json:"initiating_error,omitempty"`
+		RollbackError   *RollbackErrorDetail `json:"rollback_error"`
+	}{RollbackError: rollbackError}
+	if initiating != nil {
+		evidence.InitiatingError = &ErrorDetail{Code: initiating.Code, Message: initiating.Message}
+	}
+	observation := integrityObservation{Kind: "ambiguous_finalization_rollback", Path: ".git", BatchID: batchID, ObservedState: evidence}
+	if projectError := p.persistIntegrityViolations(session, []integrityObservation{observation}); projectError != nil {
+		return projectError
+	}
+	projectError := integrityError(session.ID, observation)
+	projectError.InitiatingError = evidence.InitiatingError
+	projectError.RollbackError = rollbackError
+	return projectError
 }
 
 func (p *Project) quarantineFinalization(db *sql.DB, session Session, batchID, operation string, cause error) *Error {
@@ -322,6 +372,12 @@ type finalizationMember struct {
 	order             int64
 	changed           bool
 	paths             []string
+	manifest          []finalizationPath
+}
+
+type finalizationPath struct {
+	path                string
+	baseline, submitted capturedSnapshot
 }
 
 func finalizationMembers(db *sql.DB, sessionID, batchID string) ([]finalizationMember, *Error) {
@@ -350,20 +406,39 @@ func finalizationMembers(db *sql.DB, sessionID, batchID string) ([]finalizationM
 		return nil, sessionInternal(sessionID, "close commit members", err)
 	}
 	for index := range members {
-		pathRows, err := db.Query(`SELECT path FROM claims WHERE task_id = ? ORDER BY claim_order`, members[index].id)
+		pathRows, err := db.Query(`
+			SELECT path,
+				baseline_presence, baseline_type, baseline_content_hash, baseline_executable, baseline_content,
+				submitted_presence, submitted_type, submitted_content_hash, submitted_executable, submitted_content
+			FROM frozen_batch_paths
+			WHERE batch_id = ? AND task_id = ?
+			ORDER BY claim_order`, batchID, members[index].id)
 		if err != nil {
-			return nil, sessionInternal(sessionID, "read task commit claims", err)
+			return nil, sessionInternal(sessionID, "read task frozen manifest", err)
 		}
 		for pathRows.Next() {
-			var path string
-			if err := pathRows.Scan(&path); err != nil {
+			var manifest finalizationPath
+			var baselineHash, submittedHash sql.NullString
+			var baselineExecutable, submittedExecutable int
+			if err := pathRows.Scan(
+				&manifest.path,
+				&manifest.baseline.Presence, &manifest.baseline.Type, &baselineHash, &baselineExecutable, &manifest.baseline.content,
+				&manifest.submitted.Presence, &manifest.submitted.Type, &submittedHash, &submittedExecutable, &manifest.submitted.content,
+			); err != nil {
 				pathRows.Close()
-				return nil, sessionInternal(sessionID, "read task commit claim", err)
+				return nil, sessionInternal(sessionID, "read task frozen manifest", err)
 			}
-			members[index].paths = append(members[index].paths, path)
+			manifest.baseline.Path = manifest.path
+			manifest.baseline.ContentHash = baselineHash.String
+			manifest.baseline.Executable = baselineExecutable != 0
+			manifest.submitted.Path = manifest.path
+			manifest.submitted.ContentHash = submittedHash.String
+			manifest.submitted.Executable = submittedExecutable != 0
+			members[index].paths = append(members[index].paths, manifest.path)
+			members[index].manifest = append(members[index].manifest, manifest)
 		}
 		if err := pathRows.Close(); err != nil {
-			return nil, sessionInternal(sessionID, "close task commit claims", err)
+			return nil, sessionInternal(sessionID, "close task frozen manifest", err)
 		}
 	}
 	return members, nil
@@ -377,28 +452,44 @@ func (p *Project) commitTask(session Session, batchID string, member finalizatio
 	if len(member.paths) == 0 {
 		return "", false, invalidSession(session.ID, "task_has_no_claims", "A changed submitted task has no claims.")
 	}
-	before, projectError := p.captureFinalizationPaths(member.paths)
-	if projectError != nil {
-		return "", false, projectError
+	before := make([]capturedSnapshot, 0, len(member.manifest))
+	expectedPaths := make([]string, 0, len(member.manifest))
+	for _, manifest := range member.manifest {
+		current, projectError := p.capturePath(manifest.path)
+		if projectError != nil {
+			return "", false, projectError
+		}
+		current.Path = manifest.path
+		if !snapshotsEqual(current.PathSnapshot, manifest.submitted.PathSnapshot) {
+			return "", false, invalidSession(session.ID, "submission_snapshot_mismatch", fmt.Sprintf("Claimed path %s no longer matches its frozen submitted snapshot.", manifest.path))
+		}
+		before = append(before, current)
+		if !snapshotsEqual(manifest.baseline.PathSnapshot, manifest.submitted.PathSnapshot) {
+			expectedPaths = append(expectedPaths, manifest.path)
+		}
 	}
-	changed, err := gitOutput(p.Root, append([]string{"diff", "--name-only", "--"}, member.paths...)...)
-	if err != nil {
-		return "", false, sessionInternal(session.ID, "inspect task changes", err)
-	}
-	expectedPaths := strings.Fields(changed)
 	if len(expectedPaths) == 0 {
-		return "", false, invalidSession(session.ID, "submission_snapshot_mismatch", "A changed submission has no current Git-visible changes.")
+		return "", false, invalidSession(session.ID, "submission_snapshot_mismatch", "A changed submission has no changes in its frozen manifest.")
 	}
 	args := append([]string{"add", "--"}, member.paths...)
 	if _, err := gitOutput(p.Root, args...); err != nil {
 		return "", false, sessionInternal(session.ID, "stage task changes", err)
 	}
-	staged, err := gitOutput(p.Root, "diff", "--cached", "--name-only", "--")
+	staged, err := gitBytes(p.Root, "diff", "--cached", "--name-only", "--no-renames", "-z", "--")
 	if err != nil {
 		return "", false, sessionInternal(session.ID, "inspect staged task paths", err)
 	}
-	if !samePaths(strings.Fields(staged), expectedPaths) {
+	if !samePaths(splitNullPaths(staged), expectedPaths) {
 		return "", false, invalidSession(session.ID, "commit_path_mismatch", "Staging included paths outside the task's claims or missed a claimed path.")
+	}
+	for _, manifest := range member.manifest {
+		stagedSnapshot, projectError := p.captureIndexPath(manifest.path)
+		if projectError != nil {
+			return "", false, projectError
+		}
+		if !snapshotsEqual(stagedSnapshot.PathSnapshot, manifest.submitted.PathSnapshot) {
+			return "", false, invalidSession(session.ID, "commit_snapshot_mismatch", fmt.Sprintf("Staged path %s does not match its frozen submitted snapshot.", manifest.path))
+		}
 	}
 	message := deterministicCommitMessage(member)
 	if _, err := gitOutput(p.Root, "commit", "-m", message); err != nil {
@@ -424,11 +515,11 @@ func (p *Project) commitTask(session Session, batchID string, member finalizatio
 	if dirty, err := gitOutput(p.Root, append([]string{"diff", "--name-only", "--"}, member.paths...)...); err != nil || dirty != "" {
 		return "", false, invalidSession(session.ID, "commit_claim_dirty", "Task commit left claimed changes unstaged or dirty.")
 	}
-	committed, err := gitOutput(p.Root, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD")
+	committed, err := gitBytes(p.Root, "diff-tree", "--no-commit-id", "--name-only", "--no-renames", "-r", "-z", "HEAD")
 	if err != nil {
 		return "", false, sessionInternal(session.ID, "inspect task commit paths", err)
 	}
-	if !samePaths(strings.Fields(committed), expectedPaths) {
+	if !samePaths(splitNullPaths(committed), expectedPaths) {
 		return "", false, invalidSession(session.ID, "commit_path_mismatch", "Task commit does not contain exactly its claimed paths.")
 	}
 	after, projectError := p.captureFinalizationPaths(member.paths)
@@ -436,6 +527,65 @@ func (p *Project) commitTask(session Session, batchID string, member finalizatio
 		return "", false, projectError
 	}
 	return sha, !finalizationSnapshotsEqual(before, after), nil
+}
+
+func splitNullPaths(output []byte) []string {
+	if len(output) == 0 {
+		return nil
+	}
+	records := strings.Split(string(output), "\x00")
+	if records[len(records)-1] == "" {
+		records = records[:len(records)-1]
+	}
+	return records
+}
+
+func (p *Project) captureIndexPath(path string) (capturedSnapshot, *Error) {
+	return p.captureGitPath("index", path, "--literal-pathspecs", "ls-files", "--stage", "-z", "--", path)
+}
+
+func (p *Project) captureGitPath(source, path string, args ...string) (capturedSnapshot, *Error) {
+	record, err := gitBytes(p.Root, args...)
+	if err != nil {
+		return capturedSnapshot{}, internal("inspect Git "+source+" path", err)
+	}
+	if len(record) == 0 {
+		return capturedSnapshot{Path: path, PathSnapshot: PathSnapshot{Presence: "absent", Type: "absent"}}, nil
+	}
+	records := splitNullPaths(record)
+	if len(records) != 1 {
+		return capturedSnapshot{}, internal("inspect Git "+source+" path", fmt.Errorf("expected one entry for %s, found %d", path, len(records)))
+	}
+	tab := strings.IndexByte(records[0], '\t')
+	if tab < 0 || records[0][tab+1:] != path {
+		return capturedSnapshot{}, internal("parse Git "+source+" path", fmt.Errorf("unexpected entry for %s", path))
+	}
+	fields := strings.Fields(records[0][:tab])
+	if len(fields) < 3 {
+		return capturedSnapshot{}, internal("parse Git "+source+" path", fmt.Errorf("unexpected metadata for %s", path))
+	}
+	mode, objectID := fields[0], fields[2]
+	if source == "index" {
+		objectID = fields[1]
+	}
+	content, err := gitBytes(p.Root, "cat-file", "blob", objectID)
+	if err != nil {
+		return capturedSnapshot{}, internal("read Git "+source+" path", err)
+	}
+	digest := sha256.Sum256(content)
+	snapshot := capturedSnapshot{Path: path, content: content, PathSnapshot: PathSnapshot{Presence: "present", ContentHash: "sha256:" + hex.EncodeToString(digest[:])}}
+	switch mode {
+	case "100644":
+		snapshot.Type = "regular_file"
+	case "100755":
+		snapshot.Type = "regular_file"
+		snapshot.Executable = true
+	case "120000":
+		snapshot.Type = "symlink"
+	default:
+		return capturedSnapshot{}, invalid("unsupported_claim_path", fmt.Sprintf("Git %s path %s has unsupported mode %s.", source, path, mode))
+	}
+	return snapshot, nil
 }
 
 func (p *Project) captureFinalizationPaths(paths []string) ([]capturedSnapshot, *Error) {
@@ -606,9 +756,6 @@ func (p *Project) completeFinalization(db *sql.DB, sessionID, batchID string) *E
 	}
 	if _, err := tx.Exec(`DELETE FROM task_diff_reviews WHERE task_id IN (SELECT task_id FROM batch_members WHERE batch_id = ?)`, batchID); err != nil {
 		return sessionInternal(sessionID, "clear committed diff reviews", err)
-	}
-	if _, err := tx.Exec(`DELETE FROM submitted_snapshots WHERE task_id IN (SELECT task_id FROM batch_members WHERE batch_id = ?)`, batchID); err != nil {
-		return sessionInternal(sessionID, "clear committed snapshots", err)
 	}
 	if _, err := tx.Exec(`DELETE FROM claims WHERE batch_id = ?`, batchID); err != nil {
 		return sessionInternal(sessionID, "release committed claims", err)

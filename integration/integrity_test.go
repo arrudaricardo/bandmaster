@@ -1,12 +1,188 @@
 package integration_test
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
+
+	_ "github.com/ncruces/go-sqlite3/driver"
+	_ "github.com/ncruces/go-sqlite3/embed"
 )
+
+func TestIntegrityRecoveryRestoresFinalizingSessionAndIsIdempotent(t *testing.T) {
+	repo := approvedCleanRepository(t)
+	writeFile(t, filepath.Join(repo, "recovered.txt"), "baseline\n")
+	runGit(t, repo, "add", "recovered.txt")
+	runGit(t, repo, "commit", "-m", "Add recovery fixture")
+	started := successfulSessionCommand(t, repo, "start")
+	task := successfulTaskCommand(t, repo, "create", "--title", "Recover finalization", "--intent", "Restore a finalizing batch", "--expected-outcome", "Commit remains available")
+	assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-recovery")
+	successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assigned.Result.AssignmentToken, "--path", "recovered.txt")
+	writeFile(t, filepath.Join(repo, "recovered.txt"), "submitted\n")
+	submitBatchTask(t, repo, task.Result.ID, assigned.Result.AssignmentToken)
+	frozen := successfulBatchCommand(t, repo, "freeze")
+
+	state, err := sql.Open("sqlite3", filepath.Join(repo, ".git", "bandmaster", "state.db"))
+	if err != nil {
+		t.Fatalf("open recovery fixture state: %v", err)
+	}
+	defer state.Close()
+	tx, err := state.Begin()
+	if err != nil {
+		t.Fatalf("begin recovery fixture: %v", err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := tx.Exec(`UPDATE sessions SET status = 'paused', updated_at = ? WHERE id = ?`, now, started.Result.ID); err != nil {
+		t.Fatalf("pause corrupt fixture: %v", err)
+	}
+	if _, err := tx.Exec(`UPDATE batches SET status = 'quarantined', updated_at = ? WHERE id = ?`, now, frozen.Result.ID); err != nil {
+		t.Fatalf("quarantine fixture batch: %v", err)
+	}
+	if _, err := tx.Exec(`UPDATE tasks SET status = 'quarantined', updated_at = ? WHERE id = ?`, now, task.Result.ID); err != nil {
+		t.Fatalf("quarantine fixture task: %v", err)
+	}
+	result, err := tx.Exec(`INSERT INTO integrity_violations(session_id, kind, path, observed_state_json, detected_at) VALUES(?, 'fixture_corruption', '', '{}', ?)`, started.Result.ID, now)
+	if err != nil {
+		t.Fatalf("record fixture violation: %v", err)
+	}
+	violationID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("read fixture violation: %v", err)
+	}
+	if _, err := tx.Exec(`INSERT INTO integrity_quarantines(violation_id, batch_id, previous_status) VALUES(?, ?, 'finalizing')`, violationID, frozen.Result.ID); err != nil {
+		t.Fatalf("record fixture batch quarantine: %v", err)
+	}
+	if _, err := tx.Exec(`INSERT INTO integrity_quarantines(violation_id, task_id, previous_status) VALUES(?, ?, 'submitted')`, violationID, task.Result.ID); err != nil {
+		t.Fatalf("record fixture task quarantine: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit recovery fixture: %v", err)
+	}
+
+	recovered := successfulIntegrityRecovery(t, repo, "restored finalization fixture")
+	if recovered.Result.Status != "finalizing" {
+		t.Fatalf("recovered session status = %s, want finalizing", recovered.Result.Status)
+	}
+	if batch := successfulBatchCommand(t, repo, "inspect"); batch.Result.Status != "finalizing" {
+		t.Fatalf("recovered batch status = %s, want finalizing", batch.Result.Status)
+	}
+	if restoredTask := successfulTaskCommand(t, repo, "inspect", task.Result.ID); restoredTask.Result.Status != "submitted" {
+		t.Fatalf("recovered task status = %s, want submitted", restoredTask.Result.Status)
+	}
+
+	retried := successfulIntegrityRecovery(t, repo, "retry restored finalization fixture")
+	if retried.Result.Status != "finalizing" || len(retried.Result.AuditHistory) != len(recovered.Result.AuditHistory) {
+		t.Fatalf("recovery retry was not stable: first=%+v retry=%+v", recovered.Result, retried.Result)
+	}
+	commit := runBandmaster(t, repo, "batch", "commit", "--json")
+	if commit.exitCode != 0 {
+		response := decodeBatchResponse(t, commit.stdout)
+		if response.Error.Code == "incompatible_session_batch_state" || response.Error.Code == "session_not_finalizing" || response.Error.Code == "batch_not_validated" {
+			t.Fatalf("documented next command rejected recovered pair: %+v", response.Error)
+		}
+	}
+}
+
+func TestMutationRejectsIncompatibleSessionBatchPairWithoutDurableChanges(t *testing.T) {
+	repo := approvedCleanRepository(t)
+	writeFile(t, filepath.Join(repo, "incompatible.txt"), "baseline\n")
+	runGit(t, repo, "add", "incompatible.txt")
+	runGit(t, repo, "commit", "-m", "Add incompatible state fixture")
+	started := successfulSessionCommand(t, repo, "start")
+	task := successfulTaskCommand(t, repo, "create", "--title", "Existing task", "--intent", "Retain state", "--expected-outcome", "Rejected mutation is atomic")
+	assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-incompatible")
+	claimed := successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assigned.Result.AssignmentToken, "--path", "incompatible.txt")
+
+	state, err := sql.Open("sqlite3", filepath.Join(repo, ".git", "bandmaster", "state.db"))
+	if err != nil {
+		t.Fatalf("open incompatible fixture state: %v", err)
+	}
+	if _, err := state.Exec(`UPDATE batches SET status = 'finalizing' WHERE id = ?`, claimed.Result.BatchID); err != nil {
+		state.Close()
+		t.Fatalf("create incompatible fixture: %v", err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatalf("close incompatible fixture state: %v", err)
+	}
+
+	failed := runBandmaster(t, repo, "task", "create", "--title", "Must not exist", "--intent", "Reject corrupt pair", "--expected-outcome", "No durable mutation", "--json")
+	assertTaskError(t, failed, 3, "incompatible_session_batch_state", false)
+	after := successfulSessionCommand(t, repo, "inspect")
+	if after.Result.Status != "active" || len(after.Result.AuditHistory) != len(started.Result.AuditHistory) {
+		t.Fatalf("rejected mutation changed session state: before=%+v after=%+v", started.Result, after.Result)
+	}
+	if batch := successfulBatchCommand(t, repo, "inspect", claimed.Result.BatchID); batch.Result.Status != "finalizing" {
+		t.Fatalf("rejected mutation changed batch state: %+v", batch.Result)
+	}
+	if existing := successfulTaskCommand(t, repo, "inspect", task.Result.ID); existing.Result.Status != "editing" {
+		t.Fatalf("rejected mutation changed task state: %+v", existing.Result)
+	}
+}
+
+func TestIntegrityRecoveryRestoresEveryInterruptedBatchPair(t *testing.T) {
+	tests := []struct {
+		previousBatch string
+		wantSession   string
+		wantBatch     string
+	}{
+		{previousBatch: "frozen", wantSession: "finalizing", wantBatch: "frozen"},
+		{previousBatch: "validating", wantSession: "finalizing", wantBatch: "frozen"},
+		{previousBatch: "finalizing", wantSession: "finalizing", wantBatch: "finalizing"},
+		{previousBatch: "final_validating", wantSession: "finalizing", wantBatch: "finalizing"},
+		{previousBatch: "repair_pending", wantSession: "active", wantBatch: "repair_pending"},
+	}
+	for _, test := range tests {
+		t.Run(test.previousBatch, func(t *testing.T) {
+			repo := approvedCleanRepository(t)
+			started := successfulSessionCommand(t, repo, "start")
+			batchID := "batch_recovery_" + test.previousBatch
+			state, err := sql.Open("sqlite3", filepath.Join(repo, ".git", "bandmaster", "state.db"))
+			if err != nil {
+				t.Fatalf("open recovery state: %v", err)
+			}
+			tx, err := state.Begin()
+			if err != nil {
+				t.Fatalf("begin recovery state: %v", err)
+			}
+			now := time.Now().UTC().Format(time.RFC3339Nano)
+			if _, err := tx.Exec(`INSERT INTO batches(id, session_id, creation_order, base_branch, base_commit, status, created_at, updated_at) VALUES(?, ?, 1, ?, ?, 'quarantined', ?, ?)`, batchID, started.Result.ID, started.Result.StartingBranch, started.Result.StartingCommit, now, now); err != nil {
+				t.Fatalf("insert quarantined batch: %v", err)
+			}
+			if _, err := tx.Exec(`UPDATE sessions SET status = 'paused', updated_at = ? WHERE id = ?`, now, started.Result.ID); err != nil {
+				t.Fatalf("pause recovery fixture: %v", err)
+			}
+			result, err := tx.Exec(`INSERT INTO integrity_violations(session_id, kind, path, observed_state_json, detected_at) VALUES(?, 'fixture_corruption', '', '{}', ?)`, started.Result.ID, now)
+			if err != nil {
+				t.Fatalf("insert recovery violation: %v", err)
+			}
+			violationID, err := result.LastInsertId()
+			if err != nil {
+				t.Fatalf("read recovery violation: %v", err)
+			}
+			if _, err := tx.Exec(`INSERT INTO integrity_quarantines(violation_id, batch_id, previous_status) VALUES(?, ?, ?)`, violationID, batchID, test.previousBatch); err != nil {
+				t.Fatalf("insert batch quarantine: %v", err)
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatalf("commit recovery fixture: %v", err)
+			}
+			if err := state.Close(); err != nil {
+				t.Fatalf("close recovery state: %v", err)
+			}
+
+			recovered := successfulIntegrityRecovery(t, repo, "restore "+test.previousBatch+" fixture")
+			if recovered.Result.Status != test.wantSession {
+				t.Fatalf("recovered session = %s, want %s", recovered.Result.Status, test.wantSession)
+			}
+			batch := successfulBatchCommand(t, repo, "inspect", batchID)
+			if batch.Result.Status != test.wantBatch {
+				t.Fatalf("recovered batch = %s, want %s", batch.Result.Status, test.wantBatch)
+			}
+		})
+	}
+}
 
 func TestMonitorDetectsUnclaimedDriftAndRequiresAuditedRecovery(t *testing.T) {
 	repo := approvedCleanRepository(t)

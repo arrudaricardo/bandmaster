@@ -3,11 +3,23 @@ package project
 import "fmt"
 
 type Error struct {
-	Code      string
-	Message   string
-	Retryable bool
-	ExitCode  int
-	SessionID string
+	Code            string
+	Message         string
+	Retryable       bool
+	ExitCode        int
+	SessionID       string
+	InitiatingError *ErrorDetail
+	RollbackError   *RollbackErrorDetail
+}
+
+type ErrorDetail struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+type RollbackErrorDetail struct {
+	Operation string `json:"operation"`
+	Message   string `json:"message"`
 }
 
 type Project struct {

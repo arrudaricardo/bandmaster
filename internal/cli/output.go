@@ -19,9 +19,11 @@ type envelope struct {
 }
 
 type errorPayload struct {
-	Code      string `json:"code"`
-	Message   string `json:"message"`
-	Retryable bool   `json:"retryable"`
+	Code            string                       `json:"code"`
+	Message         string                       `json:"message"`
+	Retryable       bool                         `json:"retryable"`
+	InitiatingError *project.ErrorDetail         `json:"initiating_error,omitempty"`
+	RollbackError   *project.RollbackErrorDetail `json:"rollback_error,omitempty"`
 }
 
 type versionResult struct {
@@ -69,6 +71,25 @@ func writeBatch(output io.Writer, jsonOutput bool, command string, batch project
 }
 
 func writeProjectError(stdout, stderr io.Writer, jsonOutput bool, command string, err *project.Error) int {
+	if jsonOutput {
+		returnCode := writeJSON(stdout, envelope{
+			SchemaVersion: "1",
+			Command:       command,
+			Success:       false,
+			SessionID:     err.SessionID,
+			Error: &errorPayload{
+				Code:            err.Code,
+				Message:         err.Message,
+				Retryable:       err.Retryable,
+				InitiatingError: err.InitiatingError,
+				RollbackError:   err.RollbackError,
+			},
+		})
+		if returnCode != 0 {
+			return returnCode
+		}
+		return err.ExitCode
+	}
 	return writeErrorWithSession(stdout, stderr, jsonOutput, command, err.SessionID, err.Code, err.Message, err.Retryable, err.ExitCode)
 }
 

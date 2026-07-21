@@ -16,6 +16,13 @@ type Claim struct {
 	SubmittedSnapshot *PathSnapshot `json:"submitted_snapshot,omitempty"`
 }
 
+type OwnershipEvidence struct {
+	Path              string        `json:"path"`
+	Baseline          PathSnapshot  `json:"baseline"`
+	SubmittedSnapshot *PathSnapshot `json:"submitted_snapshot,omitempty"`
+	ClaimedAt         string        `json:"claimed_at"`
+}
+
 type FocusedValidation struct {
 	Name             string            `json:"name"`
 	Argv             []string          `json:"argv,omitempty"`
@@ -185,6 +192,9 @@ func (p *Project) ClaimTask(id string, request ClaimRequest) (Task, *Error) {
 		}
 		now := time.Now().UTC().Format(time.RFC3339Nano)
 		for index, claim := range claims {
+			if _, err := tx.Exec(`INSERT OR IGNORE INTO task_path_ownership(session_id, batch_id, task_id, claim_order, path, baseline_presence, baseline_type, baseline_content_hash, baseline_executable, baseline_content, claimed_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, session.ID, batchID, id, nextOrder+index, claim.Path, claim.Presence, claim.Type, nullableString(claim.ContentHash), claim.Executable, nullableBytes(claim.content), now); err != nil {
+				return Task{}, sessionInternal(session.ID, "record expanded path ownership evidence", err)
+			}
 			if _, err := tx.Exec(`INSERT INTO claims(session_id, batch_id, task_id, claim_order, path, baseline_presence, baseline_type, baseline_content_hash, baseline_executable, baseline_content, claimed_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, session.ID, batchID, id, nextOrder+index, claim.Path, claim.Presence, claim.Type, nullableString(claim.ContentHash), claim.Executable, nullableBytes(claim.content), now); err != nil {
 				return Task{}, sessionInternal(session.ID, "record expanded path claim", err)
 			}
@@ -231,6 +241,9 @@ func (p *Project) ClaimTask(id string, request ClaimRequest) (Task, *Error) {
 		return Task{}, sessionInternal(session.ID, "join collecting batch", err)
 	}
 	for index, claim := range claims {
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO task_path_ownership(session_id, batch_id, task_id, claim_order, path, baseline_presence, baseline_type, baseline_content_hash, baseline_executable, baseline_content, claimed_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, session.ID, batchID, id, index+1, claim.Path, claim.Presence, claim.Type, nullableString(claim.ContentHash), claim.Executable, nullableBytes(claim.content), now); err != nil {
+			return Task{}, sessionInternal(session.ID, "record path ownership evidence", err)
+		}
 		if _, err := tx.Exec(`INSERT INTO claims(session_id, batch_id, task_id, claim_order, path, baseline_presence, baseline_type, baseline_content_hash, baseline_executable, baseline_content, claimed_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, session.ID, batchID, id, index+1, claim.Path, claim.Presence, claim.Type, nullableString(claim.ContentHash), claim.Executable, nullableBytes(claim.content), now); err != nil {
 			return Task{}, sessionInternal(session.ID, "record path claim", err)
 		}

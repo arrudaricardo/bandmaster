@@ -92,6 +92,28 @@ func TestInitGeneratesUnapprovedConfigAndCodexSkill(t *testing.T) {
 	}
 }
 
+func TestInitGuidesValidationAroundTheFrozenBarrier(t *testing.T) {
+	repo := newGitRepository(t)
+
+	result := runBandmaster(t, repo, "init", "--json")
+	if result.exitCode != 0 {
+		t.Fatalf("init exit code = %d, stderr = %s", result.exitCode, result.stderr)
+	}
+
+	skill := readFile(t, filepath.Join(repo, ".agents", "skills", "bandmaster", "SKILL.md"))
+	for _, expected := range []string{
+		"Workers run only focused checks scoped to their owned behavior while peers share the mutable working tree",
+		"A worker-observed repository-wide failure during concurrent package movement is diagnostic only, not an official batch result",
+		"Official repository-wide validation starts only after every batch member has stopped editing and the batch is frozen",
+		"Do not keep editing after submission or race the frozen barrier",
+		"After provisional commits, preserve the existing final validation stage",
+	} {
+		if !strings.Contains(skill, expected) {
+			t.Errorf("generated skill does not contain %q:\n%s", expected, skill)
+		}
+	}
+}
+
 func TestTUIRejectsJSONModeWithStableError(t *testing.T) {
 	repo := newGitRepository(t)
 	result := runBandmaster(t, repo, "tui", "--json")

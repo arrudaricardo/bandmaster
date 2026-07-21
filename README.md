@@ -149,6 +149,70 @@ bandmaster session finish --json
 
 A successful finalization creates one deterministic local commit per changed task. A no-op task completes without an empty commit. Claims release and dependent tasks become ready only after the complete batch succeeds.
 
+If the finalization process is interrupted, recover it explicitly instead of
+reissuing the commit command:
+
+```sh
+bandmaster finalization recover --json
+# When a recognized transaction reports that rollback needs confirmation:
+bandmaster finalization recover \
+  --confirmation "Verified the recorded branch, HEAD, index, journal, and hook state" \
+  --json
+```
+
+The JSON result has stable `batch_id`, `journal_step`, `classification`,
+`action`, `outcome`, `idempotent`, `before`, `after`, and `evidence` fields.
+Recognized interrupted states can be rolled back while preserving edits and a
+clean index. Unknown branch, HEAD, index, journal, monitor, or hook activity is
+quarantined. Successful recovery results are auditable and replay unchanged on
+repeated invocation.
+
+Automation can branch on the stable errors
+`finalization_recovery_required` (use the explicit command),
+`finalization_recovery_confirmation_required` (repeat with an inspection
+confirmation), and `finalization_recovery_not_found` (no interrupted transaction
+or prior recovery exists).
+
+To deliberately stop a recognized nonterminal batch while retaining its edits,
+handoffs, snapshots, manifest, ownership, and audit evidence:
+
+```sh
+bandmaster batch abandon \
+  --reason "The approach was superseded" \
+  --confirmation "All worker and finalization processes have stopped" \
+  --json
+```
+
+Abandonment releases only active claims, cancels the batch's unfinished tasks,
+and returns the compatible `paused`/`abandoned` state pair. Inspect the preserved
+work or run `session abort` next. If an interrupted finalization journal exists,
+the command first invokes explicit finalization recovery; ambiguous Git state
+remains quarantined. The stable JSON result and audit record include the reason,
+confirmation, before/after states, released claims, Git and journal evidence,
+and any finalization recovery. Repeating a successful abandonment replays the
+same result without duplicating transitions.
+
+### Diagnose recovery state
+
+`doctor` is a strictly read-only automation surface for deciding which supported
+recovery command is safe:
+
+```sh
+bandmaster doctor --json
+```
+
+A healthy result returns `healthy: true` and an empty `findings` array. Each
+finding otherwise has a stable `code`, `severity`, affected session/batch/task
+`entities`, `paths`, structured `evidence`, and `supported_actions`. Findings
+distinguish `incompatible_session_batch_state`,
+`dangling_finalization_journal`, `contradictory_finalization_journal`,
+`staged_rollback_residue`, generic `index_drift`,
+`unresolved_integrity_violation`, and `database_cleanup_blocker`.
+
+Doctor never repairs state, runs migrations, changes Git, changes monitor state,
+or appends audit events. Use only a command listed in the finding's
+`supported_actions` after inspecting its evidence.
+
 ## Safety model
 
 Bandmaster favors **preserving work and making uncertainty visible** over guessing.

@@ -56,11 +56,12 @@ func (p *Project) scanRepository(queryer databaseQuerier, session Session) ([]in
 	}
 
 	rows, err := queryer.Query(`
-		SELECT snapshot.task_id, claim.batch_id, snapshot.path, snapshot.presence, snapshot.file_type,
+		SELECT snapshot.task_id, ownership.batch_id, snapshot.path, snapshot.presence, snapshot.file_type,
 			snapshot.content_hash, snapshot.executable
 		FROM submitted_snapshots snapshot
-		JOIN claims claim ON claim.task_id = snapshot.task_id AND claim.path = snapshot.path
-		WHERE claim.session_id = ?`, session.ID)
+		JOIN task_path_ownership ownership ON ownership.task_id = snapshot.task_id AND ownership.path = snapshot.path
+		JOIN tasks task ON task.id = snapshot.task_id
+		WHERE ownership.session_id = ? AND task.status IN ('submitted', 'quarantined')`, session.ID)
 	if err != nil {
 		return nil, sessionInternal(session.ID, "inspect submitted snapshots", err)
 	}

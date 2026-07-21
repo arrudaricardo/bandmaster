@@ -57,6 +57,41 @@ type sessionResponse struct {
 	} `json:"error"`
 }
 
+type abortPlanResponse struct {
+	SchemaVersion string `json:"schema_version"`
+	Command       string `json:"command"`
+	Success       bool   `json:"success"`
+	SessionID     string `json:"session_id"`
+	Result        struct {
+		SessionStatus string `json:"session_status"`
+		Tasks         []struct {
+			TaskID        string `json:"task_id"`
+			CurrentStatus string `json:"current_status"`
+			TargetStatus  string `json:"target_status"`
+		} `json:"affected_tasks"`
+		ActiveClaims []struct {
+			TaskID string `json:"task_id"`
+			Path   string `json:"path"`
+		} `json:"active_claims"`
+		PreservedArtifacts []struct {
+			Kind  string `json:"kind"`
+			Count int    `json:"count"`
+		} `json:"preserved_artifacts"`
+		Batches []struct {
+			BatchID string `json:"batch_id"`
+			Status  string `json:"status"`
+		} `json:"batches"`
+		Journals []struct {
+			BatchID string `json:"batch_id"`
+			Step    string `json:"step"`
+		} `json:"journals"`
+		Files    []string `json:"files"`
+		Blockers []struct {
+			Code string `json:"code"`
+		} `json:"blockers"`
+	} `json:"result"`
+}
+
 func TestSessionStartPersistsRepositoryBaselineAndAuditHistory(t *testing.T) {
 	repo := approvedCleanRepository(t)
 	startingCommit := strings.TrimSpace(runGit(t, repo, "rev-parse", "HEAD"))
@@ -140,8 +175,11 @@ func TestSessionAbortPreservesEditsAndRequiresTerminationConfirmation(t *testing
 	if response := decodeSessionResponse(t, waiting.stdout); response.Error.Code != "worker_termination_confirmation_required" {
 		t.Fatalf("unexpected abort proof error: %+v", response)
 	}
-	if session := successfulSessionCommand(t, repo, "inspect"); session.Result.Status != "aborting" {
-		t.Fatalf("abort did not enter aborting: %+v", session.Result)
+	if session := successfulSessionCommand(t, repo, "inspect"); session.Result.Status != "active" || session.Result.Monitor == nil || session.Result.Monitor.Status != "healthy" {
+		t.Fatalf("abort without proof mutated session or monitor state: %+v", session.Result)
+	}
+	if taskState := successfulTaskCommand(t, repo, "inspect", task.Result.ID); taskState.Result.Status != "editing" || len(taskState.Result.Claims) != 1 {
+		t.Fatalf("abort without proof mutated task ownership: %+v", taskState.Result)
 	}
 
 	abortResult := runBandmaster(t, repo, "session", "abort", "--termination-confirmation", "worker handle exited", "--json")
@@ -174,6 +212,225 @@ func TestSessionAbortWithoutWorkersCompletesImmediately(t *testing.T) {
 	aborted := successfulSessionCommand(t, repo, "abort")
 	if aborted.Result.Status != "aborted" {
 		t.Fatalf("claimless abort = %+v", aborted.Result)
+	}
+}
+
+func TestSessionAbortDryRunReturnsPlanWithoutMutation(t *testing.T) {
+	repo := approvedCleanRepository(t)
+	started := successfulSessionCommand(t, repo, "start")
+	task := successfulTaskCommand(t, repo, "create", "--title", "Preview abort", "--intent", "Inspect disposition", "--expected-outcome", "No mutation")
+	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-abort-preview")
+	claimed := successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "preview.txt")
+	beforeTask := successfulTaskCommand(t, repo, "inspect", task.Result.ID)
+	beforeSession := successfulSessionCommand(t, repo, "inspect")
+
+	previewResult := runBandmaster(t, repo, "session", "abort", "--dry-run", "--json")
+	if previewResult.exitCode != 0 {
+		t.Fatalf("abort dry-run failed: exit=%d stdout=%s stderr=%s", previewResult.exitCode, previewResult.stdout, previewResult.stderr)
+	}
+	var preview abortPlanResponse
+	if err := json.Unmarshal([]byte(previewResult.stdout), &preview); err != nil {
+		t.Fatalf("decode abort plan: %v\n%s", err, previewResult.stdout)
+	}
+	if !preview.Success || preview.Command != "session abort" || preview.SessionID != started.SessionID || preview.Result.SessionStatus != "active" {
+		t.Fatalf("unexpected abort plan envelope: %+v", preview)
+	}
+	if len(preview.Result.Tasks) != 1 || preview.Result.Tasks[0].TaskID != task.Result.ID || preview.Result.Tasks[0].CurrentStatus != "editing" || preview.Result.Tasks[0].TargetStatus != "quarantined" || len(preview.Result.ActiveClaims) != 1 || preview.Result.ActiveClaims[0].Path != "preview.txt" || len(preview.Result.Batches) != 1 || len(preview.Result.Files) != 1 || preview.Result.Files[0] != "preview.txt" {
+		t.Fatalf("abort plan omitted affected state: %+v", preview.Result)
+	}
+	if len(preview.Result.PreservedArtifacts) == 0 || len(preview.Result.Blockers) != 1 || preview.Result.Blockers[0].Code != "worker_termination_confirmation_required" {
+		t.Fatalf("abort plan omitted preserved evidence or blockers: %+v", preview.Result)
+	}
+
+	afterSession := successfulSessionCommand(t, repo, "inspect")
+	afterTask := successfulTaskCommand(t, repo, "inspect", task.Result.ID)
+	if afterSession.Result.Status != beforeSession.Result.Status || len(afterSession.Result.AuditHistory) != len(beforeSession.Result.AuditHistory) || afterSession.Result.Monitor == nil || beforeSession.Result.Monitor == nil || afterSession.Result.Monitor.ProcessIdentity != beforeSession.Result.Monitor.ProcessIdentity || afterSession.Result.Monitor.Status != "healthy" {
+		t.Fatalf("dry-run mutated session or monitor: before=%+v after=%+v", beforeSession.Result, afterSession.Result)
+	}
+	if afterTask.Result.Status != beforeTask.Result.Status || len(afterTask.Result.Claims) != len(claimed.Result.Claims) || len(afterTask.Result.AuditHistory) != len(beforeTask.Result.AuditHistory) {
+		t.Fatalf("dry-run mutated task state: before=%+v after=%+v", beforeTask.Result, afterTask.Result)
+	}
+}
+
+func TestSessionAbortCleanupFailureRollsBackAndRetryCompletes(t *testing.T) {
+	repo := approvedCleanRepository(t)
+	successfulSessionCommand(t, repo, "start")
+	task := successfulTaskCommand(t, repo, "create", "--title", "Retry abort", "--intent", "Roll back cleanup", "--expected-outcome", "Retry completes")
+	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-abort-retry")
+	successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "retry.txt")
+	before := successfulTaskCommand(t, repo, "inspect", task.Result.ID)
+
+	failed := runBandmasterWithEnvironment(t, repo, []string{"BANDMASTER_TEST_FAIL_ABORT_AT=after-claim-release"}, "session", "abort", "--termination-confirmation", "worker stopped", "--json")
+	if failed.exitCode == 0 || !strings.Contains(failed.stdout, "abort_cleanup_failed") {
+		t.Fatalf("injected abort cleanup did not fail safely: %+v", failed)
+	}
+	afterFailure := successfulTaskCommand(t, repo, "inspect", task.Result.ID)
+	if afterFailure.Result.Status != "editing" || len(afterFailure.Result.Claims) != 1 || len(afterFailure.Result.AuditHistory) != len(before.Result.AuditHistory) {
+		t.Fatalf("failed abort committed partial cleanup: %+v", afterFailure.Result)
+	}
+	if session := successfulSessionCommand(t, repo, "inspect"); session.Result.Status != "active" || session.Result.Monitor == nil || session.Result.Monitor.Status != "stopped" || len(session.Result.AuditHistory) != 1 {
+		t.Fatalf("failed abort left a non-retryable durable state: %+v", session.Result)
+	}
+
+	retried := runBandmaster(t, repo, "session", "abort", "--termination-confirmation", "worker stopped", "--json")
+	if retried.exitCode != 0 {
+		t.Fatalf("abort retry failed: exit=%d stdout=%s stderr=%s", retried.exitCode, retried.stdout, retried.stderr)
+	}
+	if session := decodeSessionResponse(t, retried.stdout); session.Result.Status != "aborted" {
+		t.Fatalf("abort retry did not complete: %+v", session.Result)
+	}
+}
+
+func TestSessionAbortRequiresFinalizationReconciliation(t *testing.T) {
+	repo := repositoryWithValidation(t, "")
+	successfulSessionCommand(t, repo, "start")
+	task := successfulTaskCommand(t, repo, "create", "--title", "Frozen abort", "--intent", "Require reconciliation", "--expected-outcome", "Abort remains fail closed")
+	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-frozen-abort")
+	successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "owned.txt")
+	writeFile(t, filepath.Join(repo, "owned.txt"), "frozen abort\n")
+	submitBatchTask(t, repo, task.Result.ID, assignment.Result.AssignmentToken)
+	successfulBatchCommand(t, repo, "freeze")
+
+	previewResult := runBandmaster(t, repo, "session", "abort", "--dry-run", "--termination-confirmation", "worker stopped", "--json")
+	if previewResult.exitCode != 0 {
+		t.Fatalf("frozen abort preview failed: %+v", previewResult)
+	}
+	var preview abortPlanResponse
+	if err := json.Unmarshal([]byte(previewResult.stdout), &preview); err != nil {
+		t.Fatalf("decode frozen abort plan: %v", err)
+	}
+	if len(preview.Result.Blockers) != 1 || preview.Result.Blockers[0].Code != "finalization_recovery_required" || len(preview.Result.Batches) != 1 || preview.Result.Batches[0].Status != "frozen" {
+		t.Fatalf("frozen abort plan did not require reconciliation: %+v", preview.Result)
+	}
+	blocked := runBandmaster(t, repo, "session", "abort", "--termination-confirmation", "worker stopped", "--json")
+	if blocked.exitCode != 3 || !strings.Contains(blocked.stdout, "finalization_recovery_required") {
+		t.Fatalf("unreconciled finalizing work was aborted: %+v", blocked)
+	}
+	if batch := successfulBatchCommand(t, repo, "inspect"); batch.Result.Status != "frozen" || len(batch.Result.Manifest) != 1 {
+		t.Fatalf("blocked abort mutated frozen evidence: %+v", batch.Result)
+	}
+}
+
+func TestSessionAbortPreservesQuarantinedFailureEvidence(t *testing.T) {
+	repo := approvedCleanRepository(t)
+	writeFile(t, filepath.Join(repo, "quarantined.txt"), "baseline\n")
+	runGit(t, repo, "add", "quarantined.txt")
+	runGit(t, repo, "-c", "user.name=Bandmaster Tests", "-c", "user.email=bandmaster@example.invalid", "commit", "-m", "Add quarantine fixture")
+	successfulSessionCommand(t, repo, "start")
+	task := successfulTaskCommand(t, repo, "create", "--title", "Abort quarantine", "--intent", "Preserve failure evidence", "--expected-outcome", "Abort remains auditable")
+	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-quarantined-abort")
+	successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "quarantined.txt")
+	writeFile(t, filepath.Join(repo, "quarantined.txt"), "submitted\n")
+	if reviewed := runBandmaster(t, repo, "task", "diff", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--json"); reviewed.exitCode != 0 {
+		t.Fatalf("review quarantine fixture: %+v", reviewed)
+	}
+	successfulTaskCommand(t, repo, "submit", task.Result.ID,
+		"--token", assignment.Result.AssignmentToken,
+		"--behavior-changed", "Submitted content",
+		"--key-decisions", "Preserve exact bytes",
+		"--validation-expectations", "Snapshot stays fixed",
+		"--known-risks", "None",
+	)
+	writeFile(t, filepath.Join(repo, "quarantined.txt"), "drifted\n")
+	paused := waitForSessionStatus(t, repo, "paused")
+	unresolvedViolation(t, paused, "submitted_path_drift", "quarantined.txt")
+
+	aborted := runBandmaster(t, repo, "session", "abort", "--termination-confirmation", "worker stopped", "--json")
+	if aborted.exitCode != 0 {
+		t.Fatalf("abort quarantined work: exit=%d stdout=%s stderr=%s", aborted.exitCode, aborted.stdout, aborted.stderr)
+	}
+	inspectedSession := successfulSessionCommand(t, repo, "inspect")
+	inspectedTask := successfulTaskCommand(t, repo, "inspect", task.Result.ID)
+	if inspectedSession.Result.Status != "aborted" || len(inspectedSession.Result.IntegrityViolations) == 0 || inspectedSession.Result.IntegrityViolations[0].Kind != "submitted_path_drift" {
+		t.Fatalf("abort lost quarantined failure evidence: %+v", inspectedSession.Result)
+	}
+	if inspectedTask.Result.Status != "quarantined" || len(inspectedTask.Result.Claims) != 0 || len(inspectedTask.Result.OwnershipEvidence) != 1 || inspectedTask.Result.OwnershipEvidence[0].SubmittedSnapshot == nil || inspectedTask.Result.Submission == nil {
+		t.Fatalf("abort lost quarantined ownership evidence: %+v", inspectedTask.Result)
+	}
+}
+
+func TestSessionAbortCompletesAfterFinalizationRecovery(t *testing.T) {
+	repo := repositoryWithValidation(t, "")
+	successfulSessionCommand(t, repo, "start")
+	task := successfulTaskCommand(t, repo, "create", "--title", "Recover then abort", "--intent", "Reconcile finalization first", "--expected-outcome", "Abort repair-pending work")
+	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-recovered-abort")
+	successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "owned.txt")
+	writeFile(t, filepath.Join(repo, "owned.txt"), "recovered abort\n")
+	submitBatchTask(t, repo, task.Result.ID, assignment.Result.AssignmentToken)
+	successfulBatchCommand(t, repo, "freeze")
+	successfulBatchCommand(t, repo, "validate")
+	crashed := runBandmasterWithEnvironment(t, repo, []string{"BANDMASTER_TEST_CRASH_FINALIZATION_AT=prepared"}, "batch", "commit", "--json")
+	if crashed.exitCode != 97 {
+		t.Fatalf("did not create interrupted finalization: %+v", crashed)
+	}
+	previewResult := runBandmaster(t, repo, "session", "abort", "--dry-run", "--termination-confirmation", "worker stopped", "--json")
+	if previewResult.exitCode != 0 {
+		t.Fatalf("preview interrupted finalization abort: %+v", previewResult)
+	}
+	var preview abortPlanResponse
+	if err := json.Unmarshal([]byte(previewResult.stdout), &preview); err != nil {
+		t.Fatalf("decode interrupted abort plan: %v", err)
+	}
+	if len(preview.Result.Journals) != 1 || preview.Result.Journals[0].Step != "prepared" || len(preview.Result.Blockers) != 1 || preview.Result.Blockers[0].Code != "finalization_recovery_required" {
+		t.Fatalf("interrupted abort plan omitted journal blocker: %+v", preview.Result)
+	}
+	recovered := runBandmaster(t, repo, "finalization", "recover", "--confirmation", "inspected interrupted process", "--json")
+	if recovered.exitCode != 0 {
+		t.Fatalf("recover finalization before abort: %+v", recovered)
+	}
+	if batch := successfulBatchCommand(t, repo, "inspect"); batch.Result.Status != "repair_pending" || len(batch.Result.Manifest) != 1 {
+		t.Fatalf("finalization recovery did not retain repair evidence: %+v", batch.Result)
+	}
+	aborted := runBandmaster(t, repo, "session", "abort", "--termination-confirmation", "worker stopped", "--json")
+	if aborted.exitCode != 0 || decodeSessionResponse(t, aborted.stdout).Result.Status != "aborted" {
+		t.Fatalf("abort after finalization recovery failed: %+v", aborted)
+	}
+	if inspected := successfulTaskCommand(t, repo, "inspect", task.Result.ID); len(inspected.Result.Claims) != 0 || len(inspected.Result.OwnershipEvidence) != 1 || inspected.Result.OwnershipEvidence[0].SubmittedSnapshot == nil {
+		t.Fatalf("reconciled abort lost ownership evidence: %+v", inspected.Result)
+	}
+}
+
+func TestSessionAbortReleasesSubmittedClaimsAndPreservesOwnershipEvidence(t *testing.T) {
+	repo := approvedCleanRepository(t)
+	writeFile(t, filepath.Join(repo, "owned.txt"), "before\n")
+	runGit(t, repo, "add", "owned.txt")
+	runGit(t, repo, "-c", "user.name=Bandmaster Tests", "-c", "user.email=bandmaster@example.invalid", "commit", "-m", "Add owned fixture")
+	successfulSessionCommand(t, repo, "start")
+	task := successfulTaskCommand(t, repo, "create", "--title", "Submitted abort", "--intent", "Preserve evidence", "--expected-outcome", "Release only active locking")
+	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-submitted-abort")
+	claimed := successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "owned.txt")
+	writeFile(t, filepath.Join(repo, "owned.txt"), "after\n")
+	if reviewed := runBandmaster(t, repo, "task", "diff", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--json"); reviewed.exitCode != 0 {
+		t.Fatalf("review submitted abort diff: exit=%d stdout=%s stderr=%s", reviewed.exitCode, reviewed.stdout, reviewed.stderr)
+	}
+	submitted := successfulTaskCommand(t, repo, "submit", task.Result.ID,
+		"--token", assignment.Result.AssignmentToken,
+		"--behavior-changed", "Owned content changed",
+		"--key-decisions", "Preserve the submitted bytes",
+		"--validation-expectations", "Focused validation passed",
+		"--known-risks", "None",
+	)
+	if submitted.Result.Status != "submitted" || submitted.Result.Submission == nil {
+		t.Fatalf("task was not submitted: %+v", submitted.Result)
+	}
+
+	aborted := runBandmaster(t, repo, "session", "abort", "--termination-confirmation", "worker handle exited", "--json")
+	if aborted.exitCode != 0 {
+		t.Fatalf("abort submitted task: exit=%d stdout=%s stderr=%s", aborted.exitCode, aborted.stdout, aborted.stderr)
+	}
+	inspected := successfulTaskCommand(t, repo, "inspect", task.Result.ID)
+	if inspected.Result.Status != "quarantined" || len(inspected.Result.Claims) != 0 {
+		t.Fatalf("abort retained active locking: %+v", inspected.Result)
+	}
+	if inspected.Result.Submission == nil || inspected.Result.Submission.SubmittedAt != submitted.Result.Submission.SubmittedAt {
+		t.Fatalf("abort lost structured submission: %+v", inspected.Result.Submission)
+	}
+	if len(inspected.Result.OwnershipEvidence) != 1 {
+		t.Fatalf("ownership evidence count = %d, want 1: %+v", len(inspected.Result.OwnershipEvidence), inspected.Result.OwnershipEvidence)
+	}
+	evidence := inspected.Result.OwnershipEvidence[0]
+	if evidence.Path != "owned.txt" || evidence.ClaimedAt == "" || evidence.Baseline.ContentHash != claimed.Result.Claims[0].Baseline.ContentHash || evidence.SubmittedSnapshot == nil || evidence.SubmittedSnapshot.ContentHash != submitted.Result.Claims[0].SubmittedSnapshot.ContentHash {
+		t.Fatalf("abort did not preserve attributable path evidence: %+v", evidence)
 	}
 }
 

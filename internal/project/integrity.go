@@ -40,6 +40,21 @@ func (p *Project) PrepareMutation(command string) *Error {
 		}
 		return projectError
 	}
+	// Explicit recovery commands classify and validate the inconsistent state
+	// they are responsible for repairing. Letting the generic gate reject that
+	// state first would make the supported recovery path unreachable.
+	if command == "integrity recover" || command == "finalization recover" || command == "batch abandon" {
+		return nil
+	}
+	if projectError := validateSessionBatchPair(db, session); projectError != nil {
+		return projectError
+	}
+	// Abort owns its monitor-stop and finalization-reconciliation preconditions,
+	// while resume owns the stable integrity-recovery-required response. Both
+	// still pass through the session/batch compatibility check above.
+	if command == "session abort" || command == "session resume" {
+		return nil
+	}
 	if session.Status == "paused" {
 		var kind, violationPath string
 		err := db.QueryRow(`SELECT kind, path FROM integrity_violations WHERE session_id = ? AND recovered_at IS NULL ORDER BY id LIMIT 1`, session.ID).Scan(&kind, &violationPath)
@@ -49,7 +64,7 @@ func (p *Project) PrepareMutation(command string) *Error {
 		if !errors.Is(err, sql.ErrNoRows) {
 			return sessionInternal(session.ID, "read unresolved integrity violation", err)
 		}
-		if command == "session pause" || command == "session finish" || command == "session abort" {
+		if command == "session pause" || command == "session resume" || command == "session finish" || command == "session abort" {
 			return nil
 		}
 		return invalidSession(session.ID, "session_not_active", fmt.Sprintf("Session %s is paused and has no healthy integrity monitor.", session.ID))
@@ -213,7 +228,7 @@ func quarantineBatchForIntegrity(tx *sql.Tx, sessionID string, violationID int64
 }
 
 func quarantineCurrentBatches(tx *sql.Tx, sessionID string, violationID int64, now string) *Error {
-	rows, err := tx.Query(`SELECT id FROM batches WHERE session_id = ? AND status != 'committed'`, sessionID)
+	rows, err := tx.Query(`SELECT id FROM batches WHERE session_id = ? AND status NOT IN ('committed', 'abandoned')`, sessionID)
 	if err != nil {
 		return sessionInternal(sessionID, "inspect affected batches", err)
 	}

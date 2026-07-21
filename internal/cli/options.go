@@ -27,6 +27,30 @@ func oneOption(options map[string][]string, name string) string {
 	return options[name][0]
 }
 
+func parseAbortOptions(args []string) (terminationConfirmation string, dryRun bool, err error) {
+	for index := 0; index < len(args); index++ {
+		switch args[index] {
+		case "--dry-run":
+			if dryRun {
+				return "", false, fmt.Errorf("option --dry-run may be specified only once")
+			}
+			dryRun = true
+		case "--termination-confirmation":
+			if terminationConfirmation != "" {
+				return "", false, fmt.Errorf("option --termination-confirmation may be specified only once")
+			}
+			if index+1 >= len(args) {
+				return "", false, fmt.Errorf("option --termination-confirmation requires a value")
+			}
+			index++
+			terminationConfirmation = args[index]
+		default:
+			return "", false, fmt.Errorf("unknown option %s", args[index])
+		}
+	}
+	return terminationConfirmation, dryRun, nil
+}
+
 func extractJSONFlags(args []string) (jsonOutput, prettyJSON bool, filtered []string) {
 	filtered = make([]string, 0, len(args))
 	for _, arg := range args {

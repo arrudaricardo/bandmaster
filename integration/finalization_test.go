@@ -1,12 +1,55 @@
 package integration_test
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+type finalizationRecoveryResponse struct {
+	SchemaVersion string `json:"schema_version"`
+	Command       string `json:"command"`
+	Success       bool   `json:"success"`
+	Result        struct {
+		BatchID              string `json:"batch_id"`
+		JournalStep          string `json:"journal_step"`
+		Classification       string `json:"classification"`
+		Action               string `json:"action"`
+		Outcome              string `json:"outcome"`
+		Idempotent           bool   `json:"idempotent"`
+		OperatorConfirmation string `json:"operator_confirmation,omitempty"`
+		Before               struct {
+			SessionStatus string `json:"session_status"`
+			BatchStatus   string `json:"batch_status"`
+		} `json:"before"`
+		After struct {
+			SessionStatus string `json:"session_status"`
+			BatchStatus   string `json:"batch_status"`
+		} `json:"after"`
+		Evidence struct {
+			ExpectedBranch string   `json:"expected_branch"`
+			ObservedBranch string   `json:"observed_branch"`
+			PreBatchCommit string   `json:"pre_batch_commit"`
+			ObservedHead   string   `json:"observed_head"`
+			StagedPaths    []string `json:"staged_paths"`
+			HookActivity   string   `json:"hook_activity"`
+			MonitorStatus  string   `json:"monitor_status"`
+			Reasons        []string `json:"reasons"`
+		} `json:"evidence"`
+	} `json:"result"`
+}
+
+func decodeFinalizationRecovery(t *testing.T, result commandResult) finalizationRecoveryResponse {
+	t.Helper()
+	var response finalizationRecoveryResponse
+	if err := json.Unmarshal([]byte(result.stdout), &response); err != nil {
+		t.Fatalf("decode finalization recovery: %v\n%s", err, result.stdout)
+	}
+	return response
+}
 
 func TestCommitBatchCreatesOrderedTaskCommitsAndCompletesNoOps(t *testing.T) {
 	repo := repositoryWithValidation(t, "\n  commands:\n    - name: final-check\n      argv: [\"/bin/sh\", \"-c\", \"test -f owned.txt\"]\n      timeout: 2s\n")
@@ -28,10 +71,10 @@ func TestCommitBatchCreatesOrderedTaskCommitsAndCompletesNoOps(t *testing.T) {
 	if committed.Result.Status != "committed" || len(committed.Result.Validation) != 2 || committed.Result.Validation[1].Status != "passed" {
 		t.Fatalf("batch did not commit and run final validation: %+v", committed.Result)
 	}
-	if task := successfulTaskCommand(t, repo, "inspect", changed.Result.ID); task.Result.Status != "committed" || len(task.Result.Claims) != 0 {
+	if task := successfulTaskCommand(t, repo, "inspect", changed.Result.ID); task.Result.Status != "committed" || len(task.Result.Claims) != 0 || len(task.Result.OwnershipEvidence) != 1 || task.Result.OwnershipEvidence[0].SubmittedSnapshot == nil || task.Result.Submission == nil {
 		t.Fatalf("changed task was not committed and released: %+v", task.Result)
 	}
-	if task := successfulTaskCommand(t, repo, "inspect", noOp.Result.ID); task.Result.Status != "no_op" || len(task.Result.Claims) != 0 {
+	if task := successfulTaskCommand(t, repo, "inspect", noOp.Result.ID); task.Result.Status != "no_op" || len(task.Result.Claims) != 0 || len(task.Result.OwnershipEvidence) != 1 || task.Result.OwnershipEvidence[0].SubmittedSnapshot == nil || task.Result.Submission == nil {
 		t.Fatalf("no-op task was not completed and released: %+v", task.Result)
 	}
 	if task := successfulTaskCommand(t, repo, "inspect", dependent.Result.ID); task.Result.Status != "ready" || task.Result.BatchID != "" {
@@ -44,7 +87,7 @@ func TestCommitBatchCreatesOrderedTaskCommitsAndCompletesNoOps(t *testing.T) {
 	if lines := strings.Fields(strings.TrimSpace(log)); len(lines) < 2 || strings.Join(lines[:2], " ") != "Bandmaster task" {
 		t.Fatalf("task commit message is not deterministic: %q", log)
 	}
-	if retried := successfulBatchCommand(t, repo, "commit"); retried.Result.ID != frozen.Result.ID || retried.Result.Status != "committed" {
+	if retried := successfulBatchCommand(t, repo, "commit"); retried.Result.ID != frozen.Result.ID || retried.Result.Status != "committed" || len(retried.Result.Manifest) != 2 {
 		t.Fatalf("committed batch was not idempotent: %+v", retried.Result)
 	}
 }
@@ -124,7 +167,7 @@ func TestCommitBatchQuarantinesHookChangeOutsideClaims(t *testing.T) {
 	}
 }
 
-func TestCommitBatchRecoversKnownInterruptedFinalizationSteps(t *testing.T) {
+func TestFinalizationRecoverRollsBackKnownInterruptedStepsAndIsIdempotent(t *testing.T) {
 	for _, step := range []string{"prepared", "committing", "validating"} {
 		t.Run(step, func(t *testing.T) {
 			repo := repositoryWithValidation(t, "")
@@ -140,10 +183,29 @@ func TestCommitBatchRecoversKnownInterruptedFinalizationSteps(t *testing.T) {
 			if crashed.exitCode != 97 {
 				t.Fatalf("finalization did not crash at %s: %+v", step, crashed)
 			}
-			recovered := runBandmaster(t, repo, "batch", "commit", "--json")
-			if recovered.exitCode != 3 || !strings.Contains(recovered.stdout, "finalization_failed") {
+			ambiguousRetry := runBandmaster(t, repo, "batch", "commit", "--json")
+			if ambiguousRetry.exitCode != 3 || !strings.Contains(ambiguousRetry.stdout, "finalization_recovery_required") {
+				t.Fatalf("%s interruption still allowed ambiguous batch commit recovery: %+v", step, ambiguousRetry)
+			}
+			missingConfirmation := runBandmaster(t, repo, "finalization", "recover", "--json")
+			if missingConfirmation.exitCode != 3 || !strings.Contains(missingConfirmation.stdout, "finalization_recovery_confirmation_required") {
+				t.Fatalf("%s recovery did not require operator confirmation: %+v", step, missingConfirmation)
+			}
+			recovered := runBandmaster(t, repo, "finalization", "recover", "--confirmation", "inspected interrupted test process", "--json")
+			if recovered.exitCode != 0 {
 				session := successfulSessionCommand(t, repo, "inspect")
 				t.Fatalf("fresh process did not recover %s: %+v violations=%+v", step, recovered, session.Result.IntegrityViolations)
+			}
+			response := decodeFinalizationRecovery(t, recovered)
+			if response.SchemaVersion != "1" || response.Command != "finalization recover" || !response.Success || response.Result.JournalStep != step || response.Result.Classification != "recognized" || response.Result.Action != "rollback" || response.Result.Outcome != "rolled_back" || !response.Result.Idempotent {
+				t.Fatalf("unexpected %s recovery JSON: %+v", step, response)
+			}
+			if response.Result.Before.SessionStatus != "finalizing" || response.Result.Before.BatchStatus != "finalizing" || response.Result.After.SessionStatus != "active" || response.Result.After.BatchStatus != "repair_pending" || response.Result.Evidence.ExpectedBranch == "" || response.Result.Evidence.ExpectedBranch != response.Result.Evidence.ObservedBranch || response.Result.Evidence.PreBatchCommit == "" || response.Result.Evidence.ObservedHead == "" || response.Result.Evidence.HookActivity != "stopped" || response.Result.Evidence.MonitorStatus != "stopped" || len(response.Result.Evidence.StagedPaths) != 0 {
+				t.Fatalf("incomplete %s recovery evidence: %+v", step, response.Result)
+			}
+			repeated := runBandmaster(t, repo, "finalization", "recover", "--json")
+			if repeated.exitCode != 0 || repeated.stdout != recovered.stdout {
+				t.Fatalf("%s recovery was not stable and idempotent:\nfirst=%s\nsecond=%s", step, recovered.stdout, repeated.stdout)
 			}
 			if head := strings.TrimSpace(runGit(t, repo, "rev-parse", "HEAD")); head != started.Result.StartingCommit {
 				t.Fatalf("%s recovery retained provisional commit %s", step, head)
@@ -155,6 +217,72 @@ func TestCommitBatchRecoversKnownInterruptedFinalizationSteps(t *testing.T) {
 				t.Fatalf("%s recovery did not require repair: %+v", step, batch.Result)
 			}
 		})
+	}
+}
+
+func TestFinalizationRecoverDoesNotReplayAnOlderRecoveryForANewInterruption(t *testing.T) {
+	repo := repositoryWithValidation(t, "")
+	successfulSessionCommand(t, repo, "start")
+	task := successfulTaskCommand(t, repo, "create", "--title", "Recover twice", "--intent", "Recover distinct finalization attempts", "--expected-outcome", "Each interruption is recovered")
+	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "first-worker")
+	successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "owned.txt")
+	writeFile(t, filepath.Join(repo, "owned.txt"), "first attempt\n")
+	submitBatchTask(t, repo, task.Result.ID, assignment.Result.AssignmentToken)
+	successfulBatchCommand(t, repo, "freeze")
+	successfulBatchCommand(t, repo, "validate")
+	if crashed := runBandmasterWithEnvironment(t, repo, []string{"BANDMASTER_TEST_CRASH_FINALIZATION_AT=prepared"}, "batch", "commit", "--json"); crashed.exitCode != 97 {
+		t.Fatalf("first finalization did not crash: %+v", crashed)
+	}
+	first := runBandmaster(t, repo, "finalization", "recover", "--confirmation", "inspected first interruption", "--json")
+	if first.exitCode != 0 || decodeFinalizationRecovery(t, first).Result.JournalStep != "prepared" {
+		t.Fatalf("first recovery failed: %+v", first)
+	}
+
+	successfulTaskCommand(t, repo, "repair", task.Result.ID,
+		"--user-confirmation", "the first worker is stopped",
+		"--diagnosis", "the first finalization was interrupted", "--intended-repair", "resubmit the preserved change",
+	)
+	replacement := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "second-worker")
+	writeFile(t, filepath.Join(repo, "owned.txt"), "second attempt\n")
+	submitBatchTask(t, repo, task.Result.ID, replacement.Result.AssignmentToken)
+	successfulBatchCommand(t, repo, "freeze")
+	successfulBatchCommand(t, repo, "validate")
+	if crashed := runBandmasterWithEnvironment(t, repo, []string{"BANDMASTER_TEST_CRASH_FINALIZATION_AT=committing"}, "batch", "commit", "--json"); crashed.exitCode != 97 {
+		t.Fatalf("second finalization did not crash: %+v", crashed)
+	}
+	second := runBandmaster(t, repo, "finalization", "recover", "--confirmation", "inspected second interruption", "--json")
+	if second.exitCode != 0 {
+		t.Fatalf("second recovery failed: %+v", second)
+	}
+	response := decodeFinalizationRecovery(t, second)
+	if response.Result.JournalStep != "committing" || response.Result.OperatorConfirmation != "inspected second interruption" {
+		t.Fatalf("second interruption replayed the older recovery: %+v", response.Result)
+	}
+}
+
+func TestFinalizationRecoveryAuditFailureLeavesJournalRetryable(t *testing.T) {
+	repo := repositoryWithValidation(t, "")
+	successfulSessionCommand(t, repo, "start")
+	task := successfulTaskCommand(t, repo, "create", "--title", "Retry recovery audit", "--intent", "Keep recovery durable", "--expected-outcome", "Retry completes the same recovery")
+	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "audit-worker")
+	successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "owned.txt")
+	writeFile(t, filepath.Join(repo, "owned.txt"), "retryable\n")
+	submitBatchTask(t, repo, task.Result.ID, assignment.Result.AssignmentToken)
+	successfulBatchCommand(t, repo, "freeze")
+	successfulBatchCommand(t, repo, "validate")
+	if crashed := runBandmasterWithEnvironment(t, repo, []string{"BANDMASTER_TEST_CRASH_FINALIZATION_AT=prepared"}, "batch", "commit", "--json"); crashed.exitCode != 97 {
+		t.Fatalf("finalization did not crash: %+v", crashed)
+	}
+	failed := runBandmasterWithEnvironment(t, repo, []string{"BANDMASTER_TEST_FAIL_ROLLBACK_AT=before-recovery-commit"}, "finalization", "recover", "--confirmation", "inspected retryable interruption", "--json")
+	if failed.exitCode == 0 {
+		t.Fatalf("injected recovery audit failure succeeded: %+v", failed)
+	}
+	if batch := successfulBatchCommand(t, repo, "inspect"); batch.Result.Status != "finalizing" {
+		t.Fatalf("failed recovery consumed durable state: %+v", batch.Result)
+	}
+	retried := runBandmaster(t, repo, "finalization", "recover", "--confirmation", "inspected retryable interruption", "--json")
+	if retried.exitCode != 0 || decodeFinalizationRecovery(t, retried).Result.Outcome != "rolled_back" {
+		t.Fatalf("recovery was not retryable after audit failure: %+v", retried)
 	}
 }
 
@@ -207,9 +335,13 @@ func TestCommitBatchQuarantinesExternalGitStateAfterInterruption(t *testing.T) {
 				t.Fatalf("did not create interrupted state: %+v", crashed)
 			}
 			mutate(t, repo)
-			failed := runBandmaster(t, repo, "batch", "commit", "--json")
-			if failed.exitCode != 4 || !strings.Contains(failed.stdout, "integrity") {
+			failed := runBandmaster(t, repo, "finalization", "recover", "--json")
+			if failed.exitCode != 0 {
 				t.Fatalf("%s state was accepted: %+v", name, failed)
+			}
+			response := decodeFinalizationRecovery(t, failed)
+			if response.Result.Classification != "unknown" || response.Result.Action != "quarantine" || response.Result.Outcome != "quarantined" || response.Result.Evidence.ObservedBranch == "" || response.Result.Evidence.ObservedHead == "" {
+				t.Fatalf("%s quarantine lacked structured evidence: %+v", name, response)
 			}
 			if session := successfulSessionCommand(t, repo, "inspect"); session.Result.Status != "paused" {
 				t.Fatalf("%s state did not pause session: %+v", name, session.Result)
@@ -236,9 +368,13 @@ func TestCommitBatchQuarantinesUnknownStateAfterInterruptedFinalization(t *testi
 		t.Fatal(err)
 	}
 	_ = runBandmaster(t, repo, "batch", "commit", "--json")
-	failed := runBandmaster(t, repo, "batch", "commit", "--json")
-	if failed.exitCode != 4 || !strings.Contains(failed.stdout, "integrity") {
+	failed := runBandmaster(t, repo, "finalization", "recover", "--json")
+	if failed.exitCode != 0 {
 		t.Fatalf("unknown interrupted finalization state was not quarantined: exit=%d stdout=%s", failed.exitCode, failed.stdout)
+	}
+	recovery := decodeFinalizationRecovery(t, failed)
+	if recovery.Result.Classification != "unknown" || recovery.Result.Action != "quarantine" || recovery.Result.Outcome != "quarantined" || len(recovery.Result.Evidence.Reasons) == 0 {
+		t.Fatalf("unknown interrupted finalization did not report quarantine evidence: %+v", recovery.Result)
 	}
 	if session := successfulSessionCommand(t, repo, "inspect"); session.Result.Status != "paused" {
 		t.Fatalf("unknown interrupted finalization did not pause the session: %+v", session.Result)

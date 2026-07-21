@@ -150,7 +150,7 @@ func (p *Project) openState() (*sql.DB, *Error) {
 			creation_order INTEGER NOT NULL,
 			base_branch TEXT NOT NULL,
 			base_commit TEXT NOT NULL,
-			status TEXT NOT NULL CHECK (status IN ('collecting', 'frozen', 'validating', 'repair_pending', 'repairing', 'finalizing', 'final_validating', 'committed', 'quarantined')),
+			status TEXT NOT NULL CHECK (status IN ('collecting', 'frozen', 'validating', 'repair_pending', 'repairing', 'finalizing', 'final_validating', 'committed', 'quarantined', 'abandoned')),
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL,
 			UNIQUE(session_id, creation_order)
@@ -193,6 +193,20 @@ func (p *Project) openState() (*sql.DB, *Error) {
 			UNIQUE(task_id, path),
 			UNIQUE(task_id, claim_order)
 		)`,
+		`CREATE TABLE IF NOT EXISTS task_path_ownership (
+			session_id TEXT NOT NULL REFERENCES sessions(id),
+			batch_id TEXT NOT NULL REFERENCES batches(id),
+			task_id TEXT NOT NULL REFERENCES tasks(id),
+			claim_order INTEGER NOT NULL,
+			path TEXT NOT NULL,
+			baseline_presence TEXT NOT NULL CHECK (baseline_presence IN ('absent', 'present')),
+			baseline_type TEXT NOT NULL CHECK (baseline_type IN ('absent', 'regular_file', 'symlink')),
+			baseline_content_hash TEXT,
+			baseline_executable INTEGER NOT NULL CHECK (baseline_executable IN (0, 1)),
+			baseline_content BLOB,
+			claimed_at TEXT NOT NULL,
+			PRIMARY KEY(task_id, path)
+		)`,
 		`CREATE TABLE IF NOT EXISTS focused_validations (
 			task_id TEXT NOT NULL REFERENCES tasks(id),
 			validation_order INTEGER NOT NULL,
@@ -224,7 +238,7 @@ func (p *Project) openState() (*sql.DB, *Error) {
 			executable INTEGER NOT NULL CHECK (executable IN (0, 1)),
 			content BLOB,
 			PRIMARY KEY(task_id, path),
-			FOREIGN KEY(task_id, path) REFERENCES claims(task_id, path)
+			FOREIGN KEY(task_id, path) REFERENCES task_path_ownership(task_id, path)
 		)`,
 		`CREATE TABLE IF NOT EXISTS frozen_batch_paths (
 			batch_id TEXT NOT NULL REFERENCES batches(id),
@@ -290,6 +304,34 @@ func (p *Project) openState() (*sql.DB, *Error) {
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS finalization_recovery_events (
+			sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+			batch_id TEXT NOT NULL REFERENCES batches(id),
+			session_id TEXT NOT NULL REFERENCES sessions(id),
+			journal_created_at TEXT NOT NULL,
+			journal_step TEXT NOT NULL,
+			classification TEXT NOT NULL CHECK (classification IN ('recognized', 'unknown')),
+			action TEXT NOT NULL CHECK (action IN ('rollback', 'quarantine')),
+			outcome TEXT NOT NULL CHECK (outcome IN ('rolled_back', 'quarantined')),
+			operator_confirmation TEXT,
+			before_state_json TEXT NOT NULL,
+			after_state_json TEXT NOT NULL,
+			journal_evidence_json TEXT NOT NULL,
+			result_json TEXT NOT NULL,
+			occurred_at TEXT NOT NULL,
+			UNIQUE(batch_id, journal_created_at)
+		)`,
+		`CREATE TABLE IF NOT EXISTS batch_abandonment_events (
+			batch_id TEXT PRIMARY KEY REFERENCES batches(id),
+			session_id TEXT NOT NULL REFERENCES sessions(id),
+			reason TEXT NOT NULL,
+			confirmation TEXT NOT NULL,
+			before_state_json TEXT NOT NULL,
+			after_state_json TEXT NOT NULL,
+			evidence_json TEXT NOT NULL,
+			result_json TEXT NOT NULL,
+			occurred_at TEXT NOT NULL
+		)`,
 		`CREATE TABLE IF NOT EXISTS task_commits (
 			batch_id TEXT NOT NULL REFERENCES batches(id),
 			task_id TEXT NOT NULL REFERENCES tasks(id),
@@ -306,7 +348,7 @@ func (p *Project) openState() (*sql.DB, *Error) {
 			executable INTEGER NOT NULL CHECK (executable IN (0, 1)),
 			reviewed_at TEXT NOT NULL,
 			PRIMARY KEY(task_id, path),
-			FOREIGN KEY(task_id, path) REFERENCES claims(task_id, path)
+			FOREIGN KEY(task_id, path) REFERENCES task_path_ownership(task_id, path)
 		)`,
 	} {
 		if _, err := db.Exec(statement); err != nil {
@@ -322,11 +364,73 @@ func (p *Project) openState() (*sql.DB, *Error) {
 		db.Close()
 		return nil, projectError
 	}
+	if projectError := migrateOwnershipEvidenceSchema(db); projectError != nil {
+		db.Close()
+		return nil, projectError
+	}
+	if projectError := migrateBatchAbandonmentSchema(db); projectError != nil {
+		db.Close()
+		return nil, projectError
+	}
+	if projectError := migrateFinalizationRecoverySchema(db); projectError != nil {
+		db.Close()
+		return nil, projectError
+	}
 	if projectError := initializeRepairSchema(db); projectError != nil {
 		db.Close()
 		return nil, projectError
 	}
 	return db, nil
+}
+
+func migrateFinalizationRecoverySchema(db *sql.DB) *Error {
+	found, projectError := schemaColumnExists(db, "finalization_recovery_events", "journal_created_at")
+	if projectError != nil || found {
+		return projectError
+	}
+	if _, err := db.Exec(`PRAGMA foreign_keys = OFF`); err != nil {
+		return internal("prepare finalization recovery schema migration", err)
+	}
+	defer func() { _, _ = db.Exec(`PRAGMA foreign_keys = ON`) }()
+	tx, err := db.Begin()
+	if err != nil {
+		return internal("begin finalization recovery schema migration", err)
+	}
+	defer tx.Rollback()
+	for _, statement := range []string{
+		`ALTER TABLE finalization_recovery_events RENAME TO finalization_recovery_events_legacy`,
+		`CREATE TABLE finalization_recovery_events (
+			sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+			batch_id TEXT NOT NULL REFERENCES batches(id),
+			session_id TEXT NOT NULL REFERENCES sessions(id),
+			journal_created_at TEXT NOT NULL,
+			journal_step TEXT NOT NULL,
+			classification TEXT NOT NULL CHECK (classification IN ('recognized', 'unknown')),
+			action TEXT NOT NULL CHECK (action IN ('rollback', 'quarantine')),
+			outcome TEXT NOT NULL CHECK (outcome IN ('rolled_back', 'quarantined')),
+			operator_confirmation TEXT,
+			before_state_json TEXT NOT NULL,
+			after_state_json TEXT NOT NULL,
+			journal_evidence_json TEXT NOT NULL,
+			result_json TEXT NOT NULL,
+			occurred_at TEXT NOT NULL,
+			UNIQUE(batch_id, journal_created_at)
+		)`,
+		`INSERT INTO finalization_recovery_events(batch_id, session_id, journal_created_at, journal_step, classification, action, outcome, operator_confirmation, before_state_json, after_state_json, journal_evidence_json, result_json, occurred_at)
+		 SELECT batch_id, session_id, occurred_at, journal_step, classification, action, outcome, operator_confirmation, before_state_json, after_state_json, journal_evidence_json, result_json, occurred_at FROM finalization_recovery_events_legacy`,
+		`DROP TABLE finalization_recovery_events_legacy`,
+	} {
+		if _, err := tx.Exec(statement); err != nil {
+			return internal("migrate finalization recovery schema", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return internal("commit finalization recovery schema migration", err)
+	}
+	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		return internal("restore foreign keys after finalization recovery migration", err)
+	}
+	return nil
 }
 
 const repairEventsTableSQL = `CREATE TABLE IF NOT EXISTS task_repair_events (
@@ -617,6 +721,157 @@ func migratePathSnapshotSchema(db *sql.DB) *Error {
 	}
 	if err := rows.Err(); err != nil {
 		return internal("verify path snapshot migration", err)
+	}
+	return nil
+}
+
+func migrateOwnershipEvidenceSchema(db *sql.DB) *Error {
+	var submittedSQL string
+	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'submitted_snapshots'`).Scan(&submittedSQL); err != nil {
+		return internal("inspect ownership evidence schema", err)
+	}
+	if strings.Contains(submittedSQL, "REFERENCES task_path_ownership") {
+		return nil
+	}
+	if _, err := db.Exec(`PRAGMA foreign_keys = OFF`); err != nil {
+		return internal("disable foreign keys for ownership evidence migration", err)
+	}
+	foreignKeysDisabled := true
+	defer func() {
+		if foreignKeysDisabled {
+			_, _ = db.Exec(`PRAGMA foreign_keys = ON`)
+		}
+	}()
+	tx, err := db.Begin()
+	if err != nil {
+		return internal("begin ownership evidence migration", err)
+	}
+	defer tx.Rollback()
+	statements := []string{
+		`INSERT OR IGNORE INTO task_path_ownership(
+			session_id, batch_id, task_id, claim_order, path,
+			baseline_presence, baseline_type, baseline_content_hash, baseline_executable, baseline_content, claimed_at
+		) SELECT session_id, batch_id, task_id, claim_order, path,
+			baseline_presence, baseline_type, baseline_content_hash, baseline_executable, baseline_content, claimed_at
+		FROM claims`,
+		`ALTER TABLE submitted_snapshots RENAME TO submitted_snapshots_claim_backed`,
+		`CREATE TABLE submitted_snapshots (
+			task_id TEXT NOT NULL REFERENCES tasks(id),
+			path TEXT NOT NULL,
+			presence TEXT NOT NULL CHECK (presence IN ('absent', 'present')),
+			file_type TEXT NOT NULL CHECK (file_type IN ('absent', 'regular_file', 'symlink')),
+			content_hash TEXT,
+			executable INTEGER NOT NULL CHECK (executable IN (0, 1)),
+			content BLOB,
+			PRIMARY KEY(task_id, path),
+			FOREIGN KEY(task_id, path) REFERENCES task_path_ownership(task_id, path)
+		)`,
+		`INSERT INTO submitted_snapshots SELECT * FROM submitted_snapshots_claim_backed`,
+		`DROP TABLE submitted_snapshots_claim_backed`,
+		`ALTER TABLE task_diff_reviews RENAME TO task_diff_reviews_claim_backed`,
+		`CREATE TABLE task_diff_reviews (
+			task_id TEXT NOT NULL REFERENCES tasks(id),
+			path TEXT NOT NULL,
+			presence TEXT NOT NULL CHECK (presence IN ('absent', 'present')),
+			file_type TEXT NOT NULL CHECK (file_type IN ('absent', 'regular_file', 'symlink')),
+			content_hash TEXT,
+			executable INTEGER NOT NULL CHECK (executable IN (0, 1)),
+			reviewed_at TEXT NOT NULL,
+			PRIMARY KEY(task_id, path),
+			FOREIGN KEY(task_id, path) REFERENCES task_path_ownership(task_id, path)
+		)`,
+		`INSERT INTO task_diff_reviews SELECT * FROM task_diff_reviews_claim_backed`,
+		`DROP TABLE task_diff_reviews_claim_backed`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.Exec(statement); err != nil {
+			return internal("migrate ownership evidence schema", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return internal("commit ownership evidence migration", err)
+	}
+	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		return internal("restore foreign keys after ownership evidence migration", err)
+	}
+	foreignKeysDisabled = false
+	rows, err := db.Query(`PRAGMA foreign_key_check`)
+	if err != nil {
+		return internal("verify ownership evidence migration", err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		return internal("verify ownership evidence migration", errors.New("foreign key violation after migration"))
+	}
+	if err := rows.Err(); err != nil {
+		return internal("verify ownership evidence migration", err)
+	}
+	return nil
+}
+
+// migrateBatchAbandonmentSchema widens the batch state check without changing
+// child foreign-key targets. legacy_alter_table keeps references pointed at the
+// replacement `batches` table while foreign-key enforcement is suspended.
+func migrateBatchAbandonmentSchema(db *sql.DB) *Error {
+	var tableSQL string
+	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'batches'`).Scan(&tableSQL); err != nil {
+		return internal("inspect batch abandonment schema", err)
+	}
+	if strings.Contains(tableSQL, "'abandoned'") {
+		return nil
+	}
+	for _, pragma := range []string{`PRAGMA foreign_keys = OFF`, `PRAGMA legacy_alter_table = ON`} {
+		if _, err := db.Exec(pragma); err != nil {
+			return internal("prepare batch abandonment schema migration", err)
+		}
+	}
+	defer func() {
+		_, _ = db.Exec(`PRAGMA legacy_alter_table = OFF`)
+		_, _ = db.Exec(`PRAGMA foreign_keys = ON`)
+	}()
+	tx, err := db.Begin()
+	if err != nil {
+		return internal("begin batch abandonment schema migration", err)
+	}
+	defer tx.Rollback()
+	statements := []string{
+		`ALTER TABLE batches RENAME TO batches_without_abandoned`,
+		`CREATE TABLE batches (
+			id TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL REFERENCES sessions(id),
+			creation_order INTEGER NOT NULL,
+			base_branch TEXT NOT NULL,
+			base_commit TEXT NOT NULL,
+			status TEXT NOT NULL CHECK (status IN ('collecting', 'frozen', 'validating', 'repair_pending', 'repairing', 'finalizing', 'final_validating', 'committed', 'quarantined', 'abandoned')),
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			UNIQUE(session_id, creation_order)
+		)`,
+		`INSERT INTO batches SELECT * FROM batches_without_abandoned`,
+		`DROP TABLE batches_without_abandoned`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS one_collecting_batch ON batches(session_id) WHERE status = 'collecting'`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.Exec(statement); err != nil {
+			return internal("migrate batch abandonment schema", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return internal("commit batch abandonment schema migration", err)
+	}
+	if _, err := db.Exec(`PRAGMA legacy_alter_table = OFF`); err != nil {
+		return internal("restore legacy alter-table behavior", err)
+	}
+	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		return internal("restore foreign keys after batch abandonment migration", err)
+	}
+	rows, err := db.Query(`PRAGMA foreign_key_check`)
+	if err != nil {
+		return internal("verify batch abandonment schema migration", err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		return internal("verify batch abandonment schema migration", errors.New("foreign key violation after migration"))
 	}
 	return nil
 }

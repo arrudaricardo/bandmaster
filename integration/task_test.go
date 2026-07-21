@@ -44,6 +44,22 @@ type taskResponse struct {
 				Executable  bool   `json:"executable"`
 			} `json:"submitted_snapshot"`
 		} `json:"claims"`
+		OwnershipEvidence []struct {
+			Path      string `json:"path"`
+			ClaimedAt string `json:"claimed_at"`
+			Baseline  struct {
+				Presence    string `json:"presence"`
+				Type        string `json:"type"`
+				ContentHash string `json:"content_hash"`
+				Executable  bool   `json:"executable"`
+			} `json:"baseline"`
+			SubmittedSnapshot *struct {
+				Presence    string `json:"presence"`
+				Type        string `json:"type"`
+				ContentHash string `json:"content_hash"`
+				Executable  bool   `json:"executable"`
+			} `json:"submitted_snapshot"`
+		} `json:"ownership_evidence"`
 		FocusedValidation []struct {
 			Name             string            `json:"name"`
 			Argv             []string          `json:"argv"`
