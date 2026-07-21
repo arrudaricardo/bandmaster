@@ -175,13 +175,14 @@ func TestConfigApprovalAppliesOnlyToTheExactCurrentDigest(t *testing.T) {
 		Success bool `json:"success"`
 		Error   struct {
 			Code      string `json:"code"`
+			Message   string `json:"message"`
 			Retryable bool   `json:"retryable"`
 		} `json:"error"`
 	}
 	if err := json.Unmarshal([]byte(staleApproval.stdout), &failure); err != nil {
 		t.Fatalf("decode stale approval response: %v\n%s", err, staleApproval.stdout)
 	}
-	if failure.Success || failure.Error.Code != "configuration_digest_mismatch" || failure.Error.Retryable {
+	if failure.Success || failure.Error.Code != "configuration_digest_mismatch" || failure.Error.Retryable || !strings.Contains(failure.Error.Message, "bandmaster config approve") {
 		t.Fatalf("unexpected stale approval error: %+v", failure)
 	}
 }

@@ -455,7 +455,7 @@ func (p *Project) Approve(expectedDigest string) (ConfigStatus, *Error) {
 		return ConfigStatus{}, projectError
 	}
 	if expectedDigest != digest {
-		return ConfigStatus{}, invalid("configuration_digest_mismatch", fmt.Sprintf("Configuration digest is %s, not %s. Review the current configuration before approving it.", digest, expectedDigest))
+		return ConfigStatus{}, invalid("configuration_digest_mismatch", fmt.Sprintf("Configuration digest is %s, not %s. Review the current configuration, then run `bandmaster config approve %s --json`.", digest, expectedDigest, digest))
 	}
 	db, projectError := p.openState()
 	if projectError != nil {
