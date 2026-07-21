@@ -43,27 +43,35 @@ Bandmaster is a local Go CLI. It keeps its runtime state under Git metadata, cre
 
 ## Quick start
 
-**Requirements:** Go 1.24+, Git, and a normal clean Git working tree.
+**Requirements:** Git and a normal clean Git working tree. Go 1.24+ is required only when building from source.
 
-```sh
-# Install
-go install github.com/bandmaster-dev/bandmaster/cmd/bandmaster@latest
+### Install with an LLM
 
-# In the repository you want to coordinate
-bandmaster init
+Paste this prompt into a coding agent while it is in the repository you want to coordinate:
 
-# Review the generated validation configuration, then approve its exact digest
-bandmaster config status
-bandmaster config approve <digest>
+```text
+Set up Bandmaster safely in the current repository.
 
-# Commit the generated project files, then start a clean session
-bandmaster session start
+1. Confirm the working tree is clean before changing it. If it is not, stop and explain what is dirty.
+2. Fetch the latest GitHub Release from `arrudaricardo/bandmaster`, not a source build. Detect the host target: only `darwin/arm64` and `linux/amd64` release binaries are currently supported. Download every `bandmaster_*.tar.gz` archive and `checksums.txt`, verify every archive against the checksums, extract the host archive, and install `bandmaster` to `$HOME/.local/bin/bandmaster`. Add `$HOME/.local/bin` to `PATH` for this session and verify `bandmaster version --json`.
+3. Run `bandmaster init --json`, then `bandmaster config status --json` and report the generated paths and exact validation digest.
+4. Never run `bandmaster config approve`, never approve `.bandmaster.yaml` on my behalf, and do not start a session. Ask me to review the generated configuration and explicitly run `bandmaster config approve <digest> --json`. Explain that I must commit the generated `.bandmaster.yaml` and `.agents/skills/bandmaster/SKILL.md` before starting a clean session.
 
-# Open the live, read-only status dashboard (q to quit, r to refresh)
-bandmaster tui
+Use JSON output for every Bandmaster command and report any unsupported platform, download, checksum, or initialization failure without guessing around it.
 ```
 
 `init` writes `.bandmaster.yaml` and installs `.agents/skills/bandmaster/SKILL.md`. The configuration is intentionally unapproved at first: review the validation commands before authorizing them. Approval is local to the clone and invalidates whenever the configuration changes.
+
+### Manual setup
+
+```sh
+bandmaster init
+bandmaster config status
+# Review .bandmaster.yaml, then explicitly approve its displayed digest.
+bandmaster config approve <digest>
+# Commit the generated project files, then start a clean session.
+bandmaster session start
+```
 
 > **Agent integrations:** append `--json` to every Bandmaster command. Schema-versioned JSON is the stable automation contract.
 
