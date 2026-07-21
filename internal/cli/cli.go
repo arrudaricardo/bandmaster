@@ -39,11 +39,19 @@ type versionResult struct {
 	JSONSchemaCompatibility string `json:"json_schema_compatibility"`
 }
 
+type prettyJSONOutput struct{ io.Writer }
+
 func Run(args []string, stdout, stderr io.Writer) int {
-	jsonOutput, args := extractJSONFlag(args)
+	jsonOutput, prettyJSON, args := extractJSONFlags(args)
 	command := commandName(args)
+	if prettyJSON && !jsonOutput {
+		return writeError(stdout, stderr, false, command, "invalid_arguments", "--pretty requires --json.", false, exitInvalid)
+	}
+	if prettyJSON {
+		stdout = prettyJSONOutput{Writer: stdout}
+	}
 	if command == "" {
-		return writeError(stdout, stderr, jsonOutput, "unknown", "invalid_arguments", "usage: bandmaster version | tui | init | config status | config approve <digest> | session <start|inspect|pause|resume|finish|abort> [--termination-confirmation <text>] | integrity recover --confirmation <text> | batch <freeze|validate|commit|inspect> [batch-id] | task <create|list|inspect|assign|replan|cancel|requeue|recover|repair|preflight|claim|release|heartbeat|diff|submit> [--json]", false, exitInvalid)
+		return writeError(stdout, stderr, jsonOutput, "unknown", "invalid_arguments", "usage: bandmaster version | tui | init | config status | config approve <digest> | session <start|inspect|pause|resume|finish|abort> [--termination-confirmation <text>] | integrity recover --confirmation <text> | batch <freeze|validate|commit|inspect> [batch-id] | task <create|list|inspect|assign|replan|cancel|requeue|recover|repair|preflight|claim|release|heartbeat|diff|submit> [--json [--pretty]]", false, exitInvalid)
 	}
 	if command == "version" {
 		result := versionResult{
@@ -513,17 +521,19 @@ func writeBatch(output io.Writer, jsonOutput bool, command string, batch project
 	return writeHuman(output, "Batch %s is %s.\nMembers: %d\nManifest paths: %d\n", batch.ID, batch.Status, len(batch.Members), len(batch.Manifest))
 }
 
-func extractJSONFlag(args []string) (bool, []string) {
-	filtered := make([]string, 0, len(args))
-	jsonOutput := false
+func extractJSONFlags(args []string) (jsonOutput, prettyJSON bool, filtered []string) {
+	filtered = make([]string, 0, len(args))
 	for _, arg := range args {
-		if arg == "--json" {
+		switch arg {
+		case "--json":
 			jsonOutput = true
-			continue
+		case "--pretty":
+			prettyJSON = true
+		default:
+			filtered = append(filtered, arg)
 		}
-		filtered = append(filtered, arg)
 	}
-	return jsonOutput, filtered
+	return jsonOutput, prettyJSON, filtered
 }
 
 func writeProjectError(stdout, stderr io.Writer, jsonOutput bool, command string, err *project.Error) int {
@@ -553,7 +563,11 @@ func writeErrorWithSession(stdout, stderr io.Writer, jsonOutput bool, command, s
 }
 
 func writeJSON(output io.Writer, value envelope) int {
-	if err := json.NewEncoder(output).Encode(value); err != nil {
+	encoder := json.NewEncoder(output)
+	if _, ok := output.(prettyJSONOutput); ok {
+		encoder.SetIndent("", "  ")
+	}
+	if err := encoder.Encode(value); err != nil {
 		return exitInternal
 	}
 	return 0

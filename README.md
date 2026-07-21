@@ -180,7 +180,7 @@ Only one open session is allowed per repository. A new session requires a clean,
 
 ## Automation contract
 
-Every command supports `--json` and returns schema version 1:
+Every command supports compact `--json` and returns schema version 1. Add `--pretty` alongside `--json` for indented, human-readable JSON; automation should continue to use compact `--json`.
 
 ```json
 {

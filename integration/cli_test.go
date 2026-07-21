@@ -139,6 +139,26 @@ func TestVersionProvidesHumanAndVersionedJSONOutput(t *testing.T) {
 	}
 }
 
+func TestPrettyJSONOutputRequiresJSONAndUsesIndentation(t *testing.T) {
+	directory := t.TempDir()
+	pretty := runBandmaster(t, directory, "version", "--json", "--pretty")
+	if pretty.exitCode != 0 {
+		t.Fatalf("pretty version exit code = %d, stderr = %s", pretty.exitCode, pretty.stderr)
+	}
+	if !strings.Contains(pretty.stdout, "\n  \"schema_version\": \"1\"") {
+		t.Fatalf("pretty JSON is not indented:\n%s", pretty.stdout)
+	}
+	var response map[string]any
+	if err := json.Unmarshal([]byte(pretty.stdout), &response); err != nil {
+		t.Fatalf("decode pretty JSON: %v\n%s", err, pretty.stdout)
+	}
+
+	withoutJSON := runBandmaster(t, directory, "version", "--pretty")
+	if withoutJSON.exitCode != 3 || !strings.Contains(withoutJSON.stderr, "--pretty requires --json") {
+		t.Fatalf("--pretty without --json: exit=%d stdout=%q stderr=%q", withoutJSON.exitCode, withoutJSON.stdout, withoutJSON.stderr)
+	}
+}
+
 func TestConfigApprovalAppliesOnlyToTheExactCurrentDigest(t *testing.T) {
 	repo := newGitRepository(t)
 	writeFile(t, filepath.Join(repo, "go.mod"), "module example.com/project\n\ngo 1.22\n")
