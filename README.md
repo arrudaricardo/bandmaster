@@ -211,6 +211,10 @@ go build ./cmd/bandmaster
 
 CI exercises the CLI integration suite on macOS and Linux, verifies installation through Go, and cross-compiles Darwin ARM64 and Linux AMD64 binaries.
 
+## Releases
+
+Maintainers can create a release from the **Actions → Release** workflow on the default branch. Select a `patch`, `minor`, or `major` bump; the workflow calculates the next strict `vX.Y.Z` tag (starting at `v0.0.1`), runs the full test suite, builds version-stamped Darwin ARM64 and Linux AMD64 archives, writes SHA-256 checksums, pushes the tag, and publishes all assets to a GitHub Release.
+
 ## Learn more
 
 - [MVP specification](MVP_SPEC.md) — full product behavior and safety guarantees

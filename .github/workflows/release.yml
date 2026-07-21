@@ -1,0 +1,110 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: SemVer component to increment from the latest vX.Y.Z tag
+        required: true
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish release
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the default branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+
+      - name: Calculate the next version
+        id: version
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+          version="$(git tag --list 'v[0-9]*' | python3 -c '
+          import os
+          import re
+          import sys
+
+          pattern = re.compile(r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+          versions = []
+          for tag in sys.stdin.read().splitlines():
+              match = pattern.fullmatch(tag)
+              if match:
+                  versions.append(tuple(map(int, match.groups())))
+          major, minor, patch = max(versions, default=(0, 0, 0))
+          bump = os.environ["BUMP"]
+          if bump == "major":
+              major, minor, patch = major + 1, 0, 0
+          elif bump == "minor":
+              minor, patch = minor + 1, 0
+          elif bump == "patch":
+              patch += 1
+          else:
+              raise SystemExit(f"unsupported bump: {bump}")
+          print(f"{major}.{minor}.{patch}")
+          ')"
+          tag="v${version}"
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}"; then
+            echo "Tag ${tag} already exists." >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Test the release commit
+        run: go test ./... -timeout 30m
+
+      - name: Build release archives
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist artifacts
+          ldflags="-s -w -X github.com/bandmaster-dev/bandmaster/internal/cli.Version=v${VERSION}"
+          for target in darwin/arm64 linux/amd64; do
+            os="${target%/*}"
+            arch="${target#*/}"
+            binary="bandmaster_${VERSION}_${os}_${arch}"
+            mkdir -p "dist/$binary"
+            GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "$ldflags" -o "dist/$binary/bandmaster" ./cmd/bandmaster
+            tar -C "dist/$binary" -czf "artifacts/${binary}.tar.gz" bandmaster
+          done
+          (
+            cd artifacts
+            sha256sum *.tar.gz > checksums.txt
+          )
+
+      - name: Create tag and GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Bandmaster $TAG"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$TAG"
+          gh release create "$TAG" artifacts/* --verify-tag --generate-notes --title "Bandmaster $TAG"
