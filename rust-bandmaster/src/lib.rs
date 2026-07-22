@@ -4,8 +4,11 @@
 //! timestamps as strings. This preserves the Go implementation's JSON
 //! contract and lets the command layer validate transitions in one place.
 
+pub mod cli;
 pub mod error;
 pub mod model;
+pub mod project;
+pub mod tui;
 
 pub use error::{BandmasterError, ErrorDetail};
 pub use model::*;

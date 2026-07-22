@@ -6,9 +6,10 @@ description = "A simple Rust port of Bandmaster"
 license = "MIT"
 
 [features]
-default = []
+default = ["project", "cli", "tui"]
 project = []
 cli = ["project"]
+tui = []
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
