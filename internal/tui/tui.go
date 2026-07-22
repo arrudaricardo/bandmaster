@@ -31,7 +31,6 @@ type model struct {
 	options       project.DebugOptions
 	debug         project.DebugSnapshot
 	err           error
-	refreshing    bool
 	width         int
 	height        int
 	tab           int
@@ -56,7 +55,7 @@ func Run(p *project.Project, input io.Reader, output io.Writer) error {
 
 // RunDebug renders the normalized debug model as Bandmaster's canonical dashboard.
 func RunDebug(p *project.Project, options project.DebugOptions, input io.Reader, output io.Writer) error {
-	program := tea.NewProgram(model{project: p, options: options, refreshing: true, noColor: os.Getenv("NO_COLOR") != ""}, tea.WithAltScreen(), tea.WithInput(input), tea.WithOutput(output))
+	program := tea.NewProgram(model{project: p, options: options, noColor: os.Getenv("NO_COLOR") != ""}, tea.WithAltScreen(), tea.WithInput(input), tea.WithOutput(output))
 	_, err := program.Run()
 	return err
 }
@@ -96,7 +95,6 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		case "q", "ctrl+c":
 			return m, tea.Quit
 		case "r":
-			m.refreshing = true
 			return m, loadSnapshot(m.project, m.options)
 		case "up", "k":
 			m.moveSelection(-1)
@@ -140,12 +138,11 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case snapshotMsg:
 		previous := m.debug
-		m.debug, m.err, m.refreshing = message.snapshot, message.err, false
+		m.debug, m.err = message.snapshot, message.err
 		m.lastUpdatedAt = time.Now()
 		m.reconcileAfterRefresh(previous)
 		return m, waitForRefresh()
 	case tickMsg:
-		m.refreshing = true
 		return m, loadSnapshot(m.project, m.options)
 	}
 	return m, nil
@@ -157,7 +154,7 @@ func (m model) View() string {
 	}
 	body := m.renderDashboard()
 	if m.height > 0 {
-		lines := strings.Split(body, "\n")
+		lines := strings.Split(strings.TrimSuffix(body, "\n"), "\n")
 		if len(lines) > m.height {
 			footer := ""
 			for i := len(lines) - 1; i >= 0; i-- {
@@ -167,6 +164,9 @@ func (m model) View() string {
 				}
 			}
 			lines = append(lines[:m.height-1], footer)
+		} else if len(lines) < m.height {
+			padding := make([]string, m.height-len(lines))
+			lines = append(lines[:len(lines)-1], append(padding, lines[len(lines)-1])...)
 		}
 		body = strings.Join(lines, "\n")
 	}
@@ -175,7 +175,7 @@ func (m model) View() string {
 
 func (m model) renderDashboard() string {
 	if m.err != nil {
-		return m.guided("Bandmaster is not initialized", "Bandmaster coordinates Agents working on durable Tasks in one repository.", "bandmaster init", "q quit · r refresh")
+		return m.guided("Bandmaster is not initialized", "Bandmaster coordinates Agents working on durable Tasks in one repository.", "bandmaster init")
 	}
 	if screen := m.guidedState(); screen != "" {
 		return screen
@@ -224,36 +224,28 @@ func (m model) renderDashboard() string {
 func (m model) guidedState() string {
 	snapshot := m.debug
 	if snapshot.State.Initialization == "uninitialized" || !snapshot.Configuration.Present {
-		return m.guided("Initialize Bandmaster", "Create and review the tracked Agent configuration before orchestration begins.", "bandmaster init", "q quit · r refresh")
+		return m.guided("Initialize Bandmaster", "Create and review the tracked Agent configuration before orchestration begins.", "bandmaster init")
 	}
 	if !snapshot.Configuration.Approved {
-		return m.guided("Configuration approval required", "Approval is a trust boundary: inspect .bandmaster.yaml before accepting its validation commands.", "bandmaster config status --json → bandmaster config approve <digest> --json", "q quit · r refresh")
+		return m.guided("Configuration approval required", "Approval is a trust boundary: inspect .bandmaster.yaml before accepting its validation commands.", "bandmaster config status --json → bandmaster config approve <digest> --json")
 	}
 	if snapshot.Session == nil {
-		return m.guided("Ready to coordinate", "The repository is initialized and no Session is active.", "bandmaster session start --json", "q quit · r refresh")
+		return m.guided("Ready to coordinate", "The repository is initialized and no Session is active.", "bandmaster session start --json")
 	}
 	if hasQuarantine(snapshot) {
-		return m.guided("Session quarantined", "Bandmaster stopped unsafe progress and preserved the evidence needed for recovery.", "bandmaster debug --json", "q quit · r refresh")
+		return m.guided("Session quarantined", "Bandmaster stopped unsafe progress and preserved the evidence needed for recovery.", "bandmaster debug --json")
 	}
 	switch snapshot.Session.Status {
 	case "paused":
-		return m.guided("Session paused", "New assignments are stopped while durable Task and ownership evidence remains available.", "bandmaster session inspect --json", "q quit · r refresh")
+		return m.guided("Session paused", "New assignments are stopped while durable Task and ownership evidence remains available.", "bandmaster session inspect --json")
 	case "completed":
-		return m.guided("Session completed", "All finalized work and audit evidence remain available for inspection.", "bandmaster session inspect --json", "q quit · r refresh")
+		return m.guided("Session completed", "All finalized work and audit evidence remain available for inspection.", "bandmaster session inspect --json")
 	}
 	return ""
 }
 
-func (m model) guided(title, explanation, command, controls string) string {
-	age := "never"
-	if !m.lastUpdatedAt.IsZero() {
-		age = humanAge(time.Since(m.lastUpdatedAt)) + " ago"
-	}
-	state := "live"
-	if m.refreshing {
-		state = "refreshing"
-	}
-	return m.frame(m.heading("BANDMASTER") + "\n  " + m.strong(title) + "\n\n  " + explanation + "\n\n  Next: " + command + "\n\n  " + state + " · updated " + age + " · " + controls + "\n")
+func (m model) guided(title, explanation, command string) string {
+	return m.frame(m.heading("BANDMASTER") + "\n  " + m.strong(title) + "\n\n  " + explanation + "\n\n  Next: " + command + m.footer())
 }
 
 func (m model) renderTabs() string {
@@ -462,23 +454,15 @@ func (m model) renderDetails(width int) string {
 }
 
 func (m model) helpView() string {
-	return m.frame(m.heading("BANDMASTER HELP") + "\n  ↑/↓ or j/k  move selection\n  ←/→ or h/l  switch tabs\n  Enter       open details\n  Esc         close details or clear filter\n  /           filter the active tab\n  ?           toggle help\n  r           refresh\n  q           quit\n\n  The dashboard is strictly read-only. Suggested commands are never executed.\n")
+	return m.frame(m.heading("BANDMASTER HELP") + "\n  ↑/↓ or j/k  move selection\n  ←/→ or h/l  switch tabs\n  Enter       open details\n  Esc         close details or clear filter\n  /           filter the active tab\n  ?           toggle help\n  r           refresh\n  q           quit\n\n  The dashboard is strictly read-only. Suggested commands are never executed." + m.footer())
 }
 
 func (m model) footer() string {
-	state := "live"
-	if m.refreshing {
-		state = "refreshing"
-	}
-	age := "never"
+	age := "0s"
 	if !m.lastUpdatedAt.IsZero() {
-		age = humanAge(time.Since(m.lastUpdatedAt)) + " ago"
+		age = humanAge(time.Since(m.lastUpdatedAt))
 	}
-	controls := "↑↓ select · Enter details · ←→ tabs · / filter · ? help · r refresh · q quit"
-	if m.details {
-		controls = "↑↓ select · PgUp/PgDn scroll · [ ] dependencies · Esc back · / filter · ? help · r refresh · q quit"
-	}
-	return fmt.Sprintf("\n  %s · updated %s · %s\n", state, age, controls)
+	return fmt.Sprintf("\n  live · updated %s ago · q quit · r refresh\n", age)
 }
 
 func (m *model) moveSelection(delta int) {

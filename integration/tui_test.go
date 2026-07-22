@@ -186,13 +186,16 @@ func TestCompiledDashboardControlsBothEntryPoints(t *testing.T) {
 		t.Run(strings.Join(entry, "_"), func(t *testing.T) {
 			repo := initializeApprovedRepository(t)
 			dashboard := startCompiledDashboard(t, repo, 100, 28, entry...)
-			visible := dashboard.waitFor("Ready to coordinate")
+			visible := dashboard.waitFor("live · updated 0s ago · q quit · r refresh")
 			if ansiStyleSequence.MatchString(dashboard.output.String()) {
 				t.Fatal("NO_COLOR dashboard emitted ANSI styling")
 			}
-			refreshFrames := strings.Count(visible, "refreshing · updated")
+			liveFrames := strings.Count(visible, "live · updated 0s ago · q quit · r refresh")
 			dashboard.send("r")
-			dashboard.waitForAdditional("refreshing · updated", refreshFrames)
+			visible = dashboard.waitForAdditional("live · updated 0s ago · q quit · r refresh", liveFrames)
+			if strings.Contains(visible, "refreshing") {
+				t.Fatalf("dashboard exposed transient refresh state:\n%s", visible)
+			}
 			dashboard.resize(40, 10)
 			dashboard.waitFor("Terminal too small")
 			dashboard.resize(100, 28)

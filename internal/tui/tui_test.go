@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bandmaster-dev/bandmaster/internal/project"
 	tea "github.com/charmbracelet/bubbletea"
@@ -29,6 +30,23 @@ func TestDashboardStartsWithTaskOperationsAndAuthoritativeDetails(t *testing.T) 
 		if !strings.Contains(view, want) {
 			t.Errorf("dashboard view does not contain %q:\n%s", want, view)
 		}
+	}
+}
+
+func TestDashboardPinsStableLiveStatusToBottomRow(t *testing.T) {
+	m := model{debug: dashboardFixture(), width: 90, height: 24, lastUpdatedAt: time.Now(), noColor: true}
+	m.reconcileSelection()
+
+	view := m.View()
+	lines := strings.Split(strings.TrimSuffix(view, "\n"), "\n")
+	if got, want := lines[len(lines)-1], "  live · updated 0s ago · q quit · r refresh"; got != want {
+		t.Fatalf("bottom row = %q, want %q:\n%s", got, want, view)
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	view = updated.(model).View()
+	if strings.Contains(view, "refreshing") {
+		t.Fatalf("manual refresh changed visible live status:\n%s", view)
 	}
 }
 
