@@ -5,7 +5,7 @@
 <h1 align="center">Bandmaster</h1>
 
 <p align="center">
-  <strong>Safe, durable coordination for parallel Codex workers in one Git working tree.</strong>
+  <strong>Safe, durable coordination for parallel Codex Agents in one Git working tree.</strong>
 </p>
 
 <p align="center">
@@ -19,34 +19,36 @@
 
 ---
 
-Parallel coding agents are fast—until two agents edit the same file, a worker disappears mid-task, or an unreviewed diff lands in Git. **Bandmaster makes shared-working-tree parallelism deliberate.** It gives one parent agent a durable plan, exact file ownership, worker leases, batch barriers, validation, and attributable commits.
+Parallel coding Agents are fast—until two Agents edit the same file, an Agent disappears mid-task, or an unreviewed diff lands in Git. **Bandmaster makes shared-working-tree parallelism deliberate.** It gives one Orchestrator Agent a durable plan, exact file ownership, Agent leases, batch barriers, validation, and attributable commits.
+
+The Go implementation documented here is the canonical Bandmaster product. The Rust port is experimental and may differ in vocabulary, CLI behavior, and JSON contract.
 
 Bandmaster is a local Go CLI. It keeps its runtime state under Git metadata, creates no remote branches, and never pushes.
 
 ## Built with Codex and GPT-5.6
 
-Bandmaster grew out of using GPT-5.6 in Codex to spawn and manage parallel coding agents. The model proved remarkably capable at breaking work into independent tasks, delegating those tasks, and coordinating workers. The missing piece was a durable orchestration layer: agents still needed a reliable way to declare ownership, communicate progress, preserve context, validate their combined work, and recover safely from interruptions.
+Bandmaster grew out of using GPT-5.6 in Codex to spawn and manage parallel coding agents. The model proved remarkably capable at breaking work into independent tasks, delegating those tasks, and coordinating Agents. The missing piece was a durable orchestration layer: agents still needed a reliable way to declare ownership, communicate progress, preserve context, validate their combined work, and recover safely from interruptions.
 
 Git worktrees can provide isolation, but they are not always practical. A new worktree may be missing local environment variables, compete for development-server ports, duplicate dependencies and other resource-heavy state, and require cleanup afterward. Bandmaster explores a different approach: let agents address multiple issues concurrently on the same branch and in the same working tree, with explicit file claims and Git-aware safety barriers.
 
-Codex was used throughout Bandmaster's development as both the parent orchestrator and the source of specialized worker agents. Bandmaster was also used to improve Bandmaster itself: agents planned changes, claimed files, submitted structured handoffs, ran through batch validation, and produced attributable commits using the tool they were building. That dogfooding loop shaped the CLI, generated skill, recovery model, and agent-facing JSON contract.
+Codex was used throughout Bandmaster's development as both the Orchestrator Agent and the source of specialized executing Agents. Bandmaster was also used to improve Bandmaster itself: Agents planned changes, claimed files, submitted structured handoffs, ran through batch validation, and produced attributable commits using the tool they were building. That dogfooding loop shaped the CLI, generated skill, recovery model, and Agent-facing JSON contract.
 
 ## Why Bandmaster
 
 | Without coordination | With Bandmaster |
 | --- | --- |
-| Agents can silently overwrite one another. | Workers atomically claim exact Git-visible paths before writing. |
-| Context disappears when a parent or worker stops. | Tasks, leases, handoffs, snapshots, and audit history persist locally. |
+| Agents can silently overwrite one another. | Agents atomically claim exact Git-visible paths before writing. |
+| Context disappears when a parent or Agent stops. | Tasks, leases, handoffs, snapshots, and audit history persist locally. |
 | A passing individual change can break the combined tree. | Frozen batches run focused and repository validation before committing. |
 | Commits are hard to attribute or unwind. | One deterministic commit is created per changed task—or the batch rolls back safely. |
-| A lost worker might still be editing. | Expired or interrupted work is quarantined until termination is proven or explicitly confirmed. |
+| A lost Agent might still be editing. | Expired or interrupted work is quarantined until termination is proven or explicitly confirmed. |
 
 ## What you get
 
 - **Parallelism without file races** — disjoint, all-or-nothing path claims in a single working tree.
 - **A durable orchestration record** — sessions, dependencies, assignment attempts, leases, baselines, handoffs, validation, and audit events survive process restarts.
 - **Git integrity protection** — a monitor detects unclaimed edits, submitted-path drift, index/HEAD/branch drift, and unsafe validation mutations.
-- **A real commit barrier** — batch membership is frozen, validation is ordered and recorded, then changed tasks are committed in deterministic order.
+- **A real commit barrier** — a Batch's ordered Tasks are frozen, validation is ordered and recorded, then changed Tasks are committed in deterministic order.
 - **Recovery over guesswork** — failed or interrupted finalization restores the baseline while preserving observed edits; ambiguous state is quarantined.
 - **Generated Codex skills** — `bandmaster init` installs orchestration guidance; `--debug-skill` opts into separate evidence-led runtime debugging guidance.
 
@@ -113,10 +115,10 @@ bandmaster task create \
 
 ### 2. Assign and claim exact paths
 
-The parent assigns a ready task and retains the returned assignment token. A worker claims its entire initial write set **before** editing.
+The Orchestrator Agent assigns a ready Task and retains the returned assignment token. An Agent claims its entire initial write set **before** editing.
 
 ```sh
-bandmaster task assign <task-id> --worker worker-parser --json
+bandmaster task assign <task-id> --agent agent-parser --json
 bandmaster task claim <task-id> --token <assignment-token> \
   --path internal/parser.go \
   --path internal/parser_test.go --json
@@ -124,9 +126,9 @@ bandmaster task claim <task-id> --token <assignment-token> \
 
 Claims are atomic: an overlap blocks the whole attempt rather than granting a partial set. Claims record baselines for regular files, symlinks, absent files, deletions, and executable bits.
 
-### 3. Keep workers accountable
+### 3. Keep Agents accountable
 
-Every token-bearing command renews the worker lease. Long-running workers heartbeat, review their diff, submit a structured handoff, and stop editing.
+Every token-bearing command renews the Agent lease. Long-running Agents heartbeat, review their diff, submit a structured handoff, and stop editing.
 
 ```sh
 bandmaster task heartbeat <task-id> --token <assignment-token> --json
@@ -140,7 +142,7 @@ bandmaster task submit <task-id> --token <assignment-token> \
 
 ### 4. Freeze, validate, and finalize
 
-Once workers have stopped editing, the parent freezes the collecting batch. Bandmaster validates focused task checks followed by approved repository checks, with authoritative scans around each command.
+Once Agents have stopped editing, the parent freezes the collecting batch. Bandmaster validates focused task checks followed by approved repository checks, with authoritative scans around each command.
 
 ```sh
 bandmaster batch freeze --json
@@ -181,7 +183,7 @@ handoffs, snapshots, manifest, ownership, and audit evidence:
 ```sh
 bandmaster batch abandon \
   --reason "The approach was superseded" \
-  --confirmation "All worker and finalization processes have stopped" \
+  --confirmation "All Agent and finalization processes have stopped" \
   --json
 ```
 
@@ -230,7 +232,7 @@ bandmaster debug --complete-history --json
 
 The versioned JSON snapshot normalizes runtime/build identity, project and state
 locations, configuration approval, Git observations, sessions, tasks, derived
-workers, leases, claims, batches, manifests, validation summaries, monitors,
+Agents, leases, claims, batches, manifests, validation summaries, monitors,
 integrity violations, audit events, and actionable diagnostics. Authority-bearing
 values and stored content are redacted; safe presence, fingerprints, hashes,
 sizes, statuses, and timings remain. `--unsafe` reveals only the explicitly
@@ -253,31 +255,31 @@ normalized live terminal dashboard as the compatibility alias `bandmaster tui`.
 
 Bandmaster favors **preserving work and making uncertainty visible** over guessing.
 
-- **No hidden Git mutations:** workers must not add, commit, reset, stash, rebase, checkout, or change branches. Bandmaster owns finalization.
+- **No hidden Git mutations:** Agents must not add, commit, reset, stash, rebase, checkout, or change branches. Bandmaster owns finalization.
 - **Continuous integrity checks:** unowned Git-visible edits, submitted snapshot drift, and Git control-state drift pause the session and quarantine affected work.
 - **Validation cannot mutate the tree:** a check that changes Git-visible state is an integrity violation, not a passing validation run.
 - **Failed commits preserve edits:** hook, commit, validation, and interruption failures restore the pre-batch branch and index while retaining observed work as uncommitted edits when it is safe to do so.
-- **Ambiguity stays quarantined:** a lost worker, uncertain hook, or unknown external Git state is never silently resumed.
+- **Ambiguity stays quarantined:** a lost Agent, uncertain hook, or unknown external Git state is never silently resumed.
 - **Abort is non-destructive:** `bandmaster session abort --termination-confirmation "…"` stops orchestration, clears safe claims, and leaves uncommitted Git-visible work in place for inspection.
 
 Ignored untracked paths and external side effects are intentionally outside Bandmaster's rollback guarantee. See [MVP_SPEC.md](MVP_SPEC.md) for the complete contract.
 
 ## Agent protocol
 
-Bandmaster's generated skill is designed for a **single parent orchestrator** and multiple workers:
+Bandmaster's generated skill is designed for a **single parent orchestrator** and multiple Agents:
 
 1. Use orchestration only when at least two tasks are independently implementable and testable.
-2. The parent alone creates tasks, assigns workers, manages retries, freezes batches, validates, finalizes, and may spawn workers.
-3. Workers use JSON commands and assignment tokens; they claim before writing, heartbeat while active, submit a handoff, and then stop.
-4. The parent requeues blocked workers, assigns repairs to original owners, and never transfers a claim implicitly.
-5. If a session is discovered after a parent interruption, report it and offer to resume—do not silently start replacement workers.
-6. Lost worker handles require parent-held termination proof or explicit audited user confirmation before replacement.
+2. The parent alone creates tasks, assigns Agents, manages retries, freezes batches, validates, finalizes, and may spawn Agents.
+3. Agents use JSON commands and assignment tokens; they claim before writing, heartbeat while active, submit a handoff, and then stop.
+4. The parent requeues blocked Agents, assigns repairs to original owners, and never transfers a claim implicitly.
+5. If a session is discovered after a parent interruption, report it and offer to resume—do not silently start replacement Agents.
+6. Lost Agent handles require parent-held termination proof or explicit audited user confirmation before replacement.
 
 The generated orchestration instructions live at `.agents/skills/bandmaster/SKILL.md` after initialization. When requested with `bandmaster init --debug-skill`, evidence-led debugging instructions live separately at `.agents/skills/debug-bandmaster/SKILL.md`.
 
 ## Live status dashboard
 
-Run `bandmaster tui` from the project to see the current session, monitor health, integrity alerts, task-state counts, and active task ownership in one terminal view. The dashboard is read-only and refreshes every two seconds; press `r` for an immediate refresh or `q` to exit.
+Run `bandmaster tui` (or canonical `bandmaster debug --watch`) for the responsive, read-only operations dashboard. Tasks open first and are grouped by urgency; Agents, Batches, and Diagnostics have separate tabs. Use arrows or `j`/`k` to select, arrows or `h`/`l` to switch tabs, `Enter`/`Esc` for details, `/` to filter, `?` for help, `r` to refresh, and `q` to exit. `NO_COLOR` disables ANSI color without removing status or severity text.
 
 ```sh
 bandmaster tui
@@ -290,18 +292,18 @@ bandmaster session inspect --json
 bandmaster session pause --json
 bandmaster integrity recover --confirmation "Reviewed and restored the repository" --json
 bandmaster session resume --json
-bandmaster session abort --termination-confirmation "All worker handles have exited" --json
+bandmaster session abort --termination-confirmation "All Agent handles have exited" --json
 ```
 
 Only one open session is allowed per repository. A new session requires a clean, attached branch and index.
 
 ## Automation contract
 
-Every command supports compact `--json` and returns schema version 1. Add `--pretty` alongside `--json` for indented, human-readable JSON; automation should continue to use compact `--json`.
+Every command supports compact `--json` and returns schema version 2. Version 2 uses `agent`, `agents`, `agent_identity`, `tasks`, and `task_order` and does not emit the retired Go aliases. Add `--pretty` alongside `--json` for indented, human-readable JSON; automation should continue to use compact `--json`.
 
 ```json
 {
-  "schema_version": "1",
+  "schema_version": "2",
   "command": "task assign",
   "success": true,
   "result": {}

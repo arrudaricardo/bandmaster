@@ -20,7 +20,7 @@ Bandmaster does not use Git worktrees.
   can be inspected and resumed.
 - Validate a completed batch before committing it.
 - Create one deterministic, reviewable commit per task that changes files.
-- Recover safely from worker, parent, validation, hook, and commit failures.
+- Recover safely from Agent, parent, validation, hook, and commit failures.
 
 ## Non-Goals
 
@@ -47,8 +47,8 @@ cooperative protocol backed by detection rather than claiming hard process-level
 isolation.
 
 The protocol can detect many unsafe writes, but it cannot always identify which
-same-user process modified a file owned by an active worker. Workers can also
-read another worker's in-progress changes. These are accepted MVP limitations.
+same-user process modified a file owned by an active Agent. Agents can also
+read another Agent's in-progress changes. These are accepted MVP limitations.
 
 Continuous monitoring is best effort. A path changed and restored between
 observations may not be detected. Full repository scans at workflow transitions
@@ -74,24 +74,24 @@ The parent Codex agent is the sole orchestrator. It:
 - Loads the project-local Bandmaster skill.
 - Decides whether work contains at least two independent tasks.
 - Creates a simple task dependency graph.
-- Spawns all currently unblocked workers without a Bandmaster concurrency cap.
-- Requeues workers blocked on file claims.
+- Spawns all currently unblocked Agents without a Bandmaster concurrency cap.
+- Requeues Agents blocked on file claims.
 - Waits for a batch barrier before finalization.
-- Diagnoses failed validation and assigns repair workers.
-- Confirms worker termination through the Codex worker handle before claims can
+- Diagnoses failed validation and assigns repair Agents.
+- Confirms Agent termination through the Codex Agent handle before claims can
   be recovered. If that handle is unavailable, recovery requires explicit user
   confirmation and remains quarantined until then.
-- Never delegates agent-spawning authority to workers.
+- Never delegates agent-spawning authority to Agents.
 
-### Worker Agent
+### Agent
 
-A worker owns one task. It:
+An Agent owns one Task. It:
 
 - Performs read-only preflight inspection.
 - Declares its complete expected write set and focused validation commands.
 - Acquires all initial file claims atomically before editing.
 - Uses the opaque assignment token created by the parent assignment command on
-  every mutating worker command, including the initial claim.
+  every mutating Agent command, including the initial claim.
 - Uses Bandmaster heartbeats during implementation.
 - Does not run Git commands that mutate the index, HEAD, branches, or working
   tree.
@@ -99,7 +99,7 @@ A worker owns one task. It:
 - Submits a structured implementation summary.
 - Stops editing after submission freezes its path snapshots.
 
-Workers may run normal repository commands. Such commands remain subject to the
+Agents may run normal repository commands. Such commands remain subject to the
 same ownership and integrity checks as direct edits.
 
 ### Bandmaster CLI
@@ -107,10 +107,10 @@ same ownership and integrity checks as direct edits.
 Bandmaster is the source of truth for:
 
 - Sessions and task dependencies.
-- Persisted batches and their membership.
+- Persisted batches and their ordered Batch Tasks.
 - File claims and leases.
 - Baseline and submitted path snapshots.
-- Structured worker handoffs.
+- Structured Agent handoffs.
 - Validation results.
 - Git operations and task commits.
 - Recovery journals and append-only audit events.
@@ -125,15 +125,15 @@ It does not attempt to merge local edits to the generated skill.
 The skill is model-invoked. It starts Bandmaster orchestration only when Codex
 can identify at least two independently implementable and testable tasks.
 
-The skill instructs the parent and workers to use stable JSON command output.
+The skill instructs the parent and Agents to use stable JSON command output.
 CLI commands remain human-readable by default and support `--json` for agent
 use.
 
 If a later Codex session discovers an interrupted Bandmaster session, the skill
-reports it and offers to resume rather than spawning workers automatically.
-Workers from the interrupted parent are treated as quarantined unless their
+reports it and offers to resume rather than spawning Agents automatically.
+Agents from the interrupted parent are treated as quarantined unless their
 termination can still be proven. A new parent never assumes that loss of a
-worker handle means the worker stopped.
+Agent handle means the Agent stopped.
 
 ## Project Initialization
 
@@ -183,17 +183,17 @@ cannot share the SQLite transaction use persisted intent and recovery records.
 A session is in exactly one of these states:
 
 - `active`: tasks may be planned, assigned, or edited.
-- `paused`: no new worker may be assigned; inspection and explicit recovery are
+- `paused`: no new Agent may be assigned; inspection and explicit recovery are
   allowed.
 - `finalizing`: Bandmaster exclusively controls Git while a batch is being
   validated or committed.
 - `completed`: all accepted work is committed and the repository is clean.
-- `aborting`: workers are being stopped and claims are not yet safe to clear.
+- `aborting`: Agents are being stopped and claims are not yet safe to clear.
 - `aborted`: orchestration has stopped and preserved changes remain available
   for inspection.
 
 Integrity violations, missing monitor heartbeats, ambiguous Git state, and
-unprovable worker termination move the session to `paused`. Resuming requires
+unprovable Agent termination move the session to `paused`. Resuming requires
 the condition to be resolved or explicitly acknowledged through a recorded
 recovery action.
 
@@ -203,7 +203,7 @@ met it may instead move `finalizing -> completed`. An unambiguous validation or
 finalization failure that is not an integrity violation moves the batch to
 `repair_pending` and the session back to `active`. Every integrity violation and
 every ambiguous failure moves the batch to `quarantined` and the session to
-`paused`. Abort moves `active` or `paused -> aborting -> aborted` after worker
+`paused`. Abort moves `active` or `paused -> aborting -> aborted` after Agent
 termination and claim cleanup are resolved.
 
 ### Task States
@@ -212,31 +212,31 @@ A task is in exactly one of these states:
 
 - `planned`: its mutable planning fields or prerequisites are not ready.
 - `ready`: all prerequisites completed successfully and it may be assigned.
-- `assigned`: a worker may inspect and attempt its initial claim.
-- `editing`: its initial claims were acquired and its worker may write.
+- `assigned`: an Agent may inspect and attempt its initial Claim.
+- `editing`: its initial claims were acquired and its Agent may write.
 - `blocked`: its all-or-nothing claim request failed and it has no claims.
 - `submitted`: its claimed path snapshots and handoff are frozen.
 - `repair_pending`: its submission is invalid or incomplete and it awaits a
-  replacement worker.
-- `quarantined`: its worker or file integrity is uncertain.
+  replacement Agent.
+- `quarantined`: its Agent or file integrity is uncertain.
 - `committed`: its changed paths were committed successfully.
 - `no_op`: its no-change submission completed in a successful batch.
 - `canceled`: it was deliberately removed before completion.
 
 The normal path is `planned -> ready -> assigned -> editing -> submitted ->
 committed`. A failed initial claim moves `assigned -> blocked`; requeueing moves
-`blocked -> ready`. Worker failure while edits exist and failed validation move
+`blocked -> ready`. Agent failure while edits exist and failed validation move
 the owning task to `repair_pending`. Assigning a replacement to retained claims
 moves `repair_pending -> editing` with a new token; it does not reacquire the
 claims or change their baselines. Explicit recovery moves `quarantined ->
-repair_pending` only after the prior worker is proven stopped. A no-change task
+repair_pending` only after the prior Agent is proven stopped. A no-change task
 remains `submitted` until its batch succeeds, then moves `submitted -> no_op`.
 A prerequisite is satisfied by `committed` or `no_op`, but only after its batch
 has succeeded. Canceling a task with dependents requires canceling or replanning
 all dependents that have not started.
 
 Cancellation is allowed only from `planned`, `ready`, `blocked`, or `assigned`
-before the task has acquired any claim or joined a batch. An assigned worker must
+before the task has acquired any claim or joined a batch. An assigned Agent must
 be proven stopped and its token revoked first. An `editing`, `submitted`,
 `repair_pending`, or `quarantined` task must be completed, repaired, or handled
 by aborting the session; it cannot discard owned changes through cancellation.
@@ -246,25 +246,25 @@ by aborting the session; it cannot discard owned changes through cancellation.
 A batch is a first-class persisted record in exactly one of these states:
 
 - `collecting`: independently ready tasks may acquire claims and join it.
-- `frozen`: membership is closed and all member workers have stopped editing.
+- `frozen`: the Batch's ordered Tasks are closed and all assigned Agents have stopped editing.
 - `validating`: official validation is running.
-- `repair_pending`: one or more member tasks must be reopened for repair.
-- `repairing`: membership is closed and reopened member tasks may edit.
+- `repair_pending`: one or more Batch Tasks must be reopened for repair.
+- `repairing`: the Batch's ordered Tasks remain closed to additions while reopened Batch Tasks may edit.
 - `finalizing`: provisional task commits are being created.
 - `final_validating`: required validation is running against the provisional
   committed batch.
-- `committed`: every changed member task committed, every no-change member task
-  became `no_op`, and final validation passed.
+- `committed`: every changed Batch Task is committed, every no-change Batch Task
+  becomes `no_op`, and final validation passed.
 - `quarantined`: integrity or recovery is ambiguous.
 
 The normal path is `collecting -> frozen -> validating -> finalizing ->
 final_validating -> committed`. A command failure without an integrity violation
 moves the batch to `repair_pending`. Every integrity violation and ambiguous
-recovery moves it to `quarantined`. Reopening selected members moves
+recovery moves it to `quarantined`. Reopening selected Batch Tasks moves
 `repair_pending -> repairing`; their resubmission and a new barrier move
 `repairing -> frozen`. Explicit recovery may move `quarantined ->
 repair_pending` only after the ambiguity is resolved and audited. Repair never
-reopens batch membership, changes its base SHA, or admits unrelated tasks.
+reopens the Batch's ordered Tasks, changes its base SHA, or admits unrelated Tasks.
 
 ## Batch Model
 
@@ -272,7 +272,7 @@ Each batch records at least:
 
 - Stable batch ID and creation order.
 - Base branch name and base commit SHA.
-- Member task IDs and frozen membership order.
+- Batch Task IDs and frozen Task order.
 - Status and integrity state.
 - Frozen pre-validation path manifest.
 - Validation commands, attempts, and results.
@@ -282,7 +282,7 @@ Each batch records at least:
 - Final commit SHA or rollback result.
 
 A task joins the current collecting batch only when its initial claim succeeds.
-A blocked task does not become a member. Freezing a batch closes membership;
+A blocked Task does not become a Batch Task. Freezing a Batch closes its ordered Tasks;
 tasks that become ready later wait for a subsequent batch. Tasks in the same
 batch cannot depend on each other because prerequisites must have completed
 successfully in an earlier batch before assignment.
@@ -298,24 +298,24 @@ Each task records at least:
 - Prerequisite task IDs.
 - Status.
 - Current batch ID, when assigned to a batch.
-- Worker identity, opaque assignment token, and lease state.
+- Agent identity, opaque assignment token, and lease state.
 - Claimed files and their baseline path snapshots.
 - Focused validation commands.
 - Structured submission summary.
 - Resulting commit SHA, when committed.
 
 Planning fields can change only while a task is `planned`, `ready`, or `blocked`.
-Assignment freezes them for that worker attempt, and acquiring the first claim
+Assignment freezes them for that Agent attempt, and acquiring the first claim
 makes title, intent, dependencies, and expected outcome permanently immutable.
-Changing planning fields after assignment requires first stopping the worker,
+Changing planning fields after assignment requires first stopping the Agent,
 revoking its token, and returning the task to `planned` or `ready`.
 
 Only tasks whose prerequisites are `committed` or `no_op` in a successful prior
-batch may be assigned to workers.
+batch may be assigned to Agents.
 
 Assignment tokens prevent accidental cross-task commands but are not a security
 boundary because all agents run as the same Unix user. Reassignment revokes the
-old token and creates a new token only after the previous worker has been proven
+old token and creates a new token only after the previous Agent has been proven
 stopped.
 
 ## File Claims
@@ -347,50 +347,50 @@ executable bit. Unsupported file types are rejected.
 
 The MVP does not support directory globs, symbols, line ranges, or hunks.
 
-Claims protect writes only. Workers may read files claimed by another worker,
+Claims protect writes only. Agents may read files claimed by another Agent,
 accepting the risk of seeing in-progress content.
 
 ### Acquisition
 
-During preflight, a worker declares its complete initial write set and focused
+During preflight, an Agent declares its complete initial write set and focused
 validation commands. The complete set is acquired in one SQLite transaction.
 Bandmaster serializes claim operations, captures each baseline path snapshot
 before granting the claims, and verifies the assignment token created when the
 parent assigned the task. The transaction rechecks that every prerequisite
 completed successfully in a prior batch and that the selected collecting batch
-still has the expected base SHA. Cooperative workers must not write until the
+still has the expected base SHA. Cooperative Agents must not write until the
 claim transaction returns successfully.
 
 If any requested file is unavailable:
 
 - No requested claim is granted.
-- The worker reports that it is blocked and exits.
+- The Agent reports that it is blocked and exits.
 - The parent requeues it after relevant claims are released.
 
-A worker may expand its write set only through an atomic, non-waiting request.
+An Agent may expand its write set only through an atomic, non-waiting request.
 Every additional file must be immediately available or the expansion grants
-nothing. This avoids workers waiting on each other while holding partial claim
+nothing. This avoids Agents waiting on each other while holding partial claim
 sets.
 
-A worker may release an unused claim early only when Bandmaster verifies that
+An Agent may release an unused Claim early only when Bandmaster verifies that
 the path still matches its complete recorded baseline snapshot.
 
 ### Leases
 
-Every worker CLI action renews its lease. The skill requires explicit heartbeat
+Every Agent CLI action renews its lease. The skill requires explicit heartbeat
 commands during long periods without Bandmaster activity.
 
 Lease expiration does not make files immediately available. It moves the task
-and its claims into quarantine. The parent must confirm that the old worker has
+and its claims into quarantine. The parent must confirm that the old Agent has
 stopped before a replacement can inherit the task, claims, baselines, and
 current edits.
 
-This prevents a slow original worker and a replacement from concurrently
+This prevents a slow original Agent and a replacement from concurrently
 writing the same shared file.
 
 Lease expiry alone is never proof of termination. Recovery requires either a
 successful cancellation and termination result from the parent-held Codex
-worker handle or explicit user confirmation when that handle was lost. The
+Agent handle or explicit user confirmation when that handle was lost. The
 confirmation is recorded in the audit history with the new assignment token.
 
 ## Integrity Monitor
@@ -420,19 +420,19 @@ and timestamp. Only explicit audited recovery can move the batch from
 `quarantined` to `repair_pending`.
 
 The monitor cannot reliably identify a process that writes a file currently
-claimed by another active worker. Cooperative compliance with the generated
+claimed by another active Agent. Cooperative compliance with the generated
 skill remains required.
 
 Integrity monitoring covers every tracked path and every untracked path not
 excluded by standard Git ignore rules. An untracked ignored path is outside
 claim, attribution, validation-mutation, and rollback guarantees. A tracked path
 remains covered even if an ignore rule also matches it. Changes to ignored
-caches or generated output may affect workers, so repository validation commands
+caches or generated output may affect Agents, so repository validation commands
 should avoid depending on concurrently mutable ignored state where practical.
 
-## Worker Submission
+## Agent Submission
 
-Before submission, the worker must:
+Before submission, the Agent must:
 
 1. Review the complete Git-visible diff from each claimed path's baseline
    snapshot to its current snapshot.
@@ -458,7 +458,7 @@ line-level attribution.
 ## Batch Barrier
 
 Agents edit concurrently, but validation and commits happen at a batch barrier.
-The parent reaches the barrier only after every active worker has stopped
+The parent reaches the barrier only after every active Agent has stopped
 editing by submitting, blocking, failing, or being deliberately stopped.
 
 Reaching the barrier freezes the current `collecting` or `repairing` batch.
@@ -467,8 +467,8 @@ later batch.
 
 Before validation, Bandmaster verifies:
 
-- No worker remains active.
-- Every batch member is `submitted`; no member remains `assigned`, `editing`,
+- No Agent remains active.
+- Every Batch Task is `submitted`; no Batch Task remains `assigned`, `editing`,
   `repair_pending`, or `quarantined`.
 - Every changed non-ignored path has exactly one submitted owner.
 - Every submitted path still matches its frozen snapshot.
@@ -485,7 +485,7 @@ working tree.
 Bandmaster, not the agents, executes and records official validation commands.
 It runs:
 
-- Focused commands declared by workers during preflight.
+- Focused commands declared by Agents during preflight.
 - Repository-wide commands from `.bandmaster.yaml`.
 
 Commands run sequentially after the batch barrier so their results are not
@@ -508,7 +508,7 @@ If a validation command exits unsuccessfully without an integrity violation:
 - No task is committed.
 - Claims and working changes remain in place.
 - The parent diagnoses the combined failure.
-- The parent assigns repair workers to one or more existing owning tasks and
+- The parent assigns repair Agents to one or more existing owning tasks and
   reruns the barrier.
 
 A validation command that mutates a Git-visible path follows the integrity
@@ -519,22 +519,22 @@ any repair assignment.
 
 Repairs preserve the original ownership attribution. They apply both to a
 submitted task reopened after validation or finalization failure and to an
-unsubmitted task whose worker stopped with partial edits. The parent selects the
+unsubmitted task whose Agent stopped with partial edits. The parent selects the
 task or tasks that own the paths requiring changes. For each selected task,
 Bandmaster:
 
-1. Verifies that the selected task's prior worker has stopped.
+1. Verifies that the selected task's prior Agent has stopped.
 2. Invalidates any frozen submission, records the current partial-edit snapshot,
    and moves the task to `repair_pending` without releasing its claims or
    changing its baselines.
 3. Records the diagnosis and intended repair in the task handoff history.
 4. Creates a new assignment token and moves the task directly to `editing` with
-   one replacement worker because its claims are already held.
-5. Leaves an initially collecting batch open after an ordinary worker failure,
+   one replacement Agent because its claims are already held.
+5. Leaves an initially collecting batch open after an ordinary Agent failure,
    or moves a previously frozen `repair_pending` batch to `repairing` with its
-   membership closed.
+   Batch's ordered Tasks closed.
 
-A repair worker may edit only the claims owned by its task and may use normal
+A repair Agent may edit only the claims owned by its task and may use normal
 atomic claim expansion for currently unowned paths. Claims are never silently
 transferred between tasks. If a repair requires paths owned by multiple tasks,
 the parent reopens each owning task and repairs them separately, sequentially or
@@ -637,7 +637,7 @@ A session can finish successfully only when:
 Successful completion leaves validated local commits on the original current
 branch. Bandmaster never pushes them.
 
-Aborting a session stops orchestration, clears claims after workers are
+Aborting a session stops orchestration, clears claims after Agents are
 confirmed stopped, preserves uncommitted working changes, and retains ownership
 and audit records for inspection. A new session cannot start until the working
 tree is made clean.
@@ -652,12 +652,12 @@ including:
 - Task creation and status changes.
 - Claim acquisition, expansion, release, expiration, and quarantine.
 - Baseline and submitted path snapshots.
-- Batch creation, membership, freezing, repair, and finalization.
+- Batch creation, ordered Batch Tasks, freezing, repair, and finalization.
 - Integrity violations.
 - Validation commands and results.
 - Commit attempts, hooks, rollback, and resulting SHAs.
 
-Full Codex transcripts are not stored. Structured task intent and worker
+Full Codex transcripts are not stored. Structured task intent and Agent
 handoffs provide the durable context needed for diagnosis and recovery.
 
 ## CLI Design Principles
@@ -683,7 +683,7 @@ decision. The required capabilities are:
 - Start, inspect, pause, resume, finish, and abort a session.
 - Create and inspect tasks and dependencies.
 - Atomically claim, expand, and release exact paths.
-- Heartbeat workers and recover expired or quarantined tasks.
+- Heartbeat Agents and recover expired or quarantined tasks.
 - Review and submit task diffs and structured handoffs.
 - Inspect integrity violations and audit history.
 - Validate and transactionally finalize a completed batch.
@@ -694,7 +694,7 @@ decision. The required capabilities are:
 A future isolated or patch-queue mode may produce independent task branches and
 real Git integration conflicts. That mode can add a specialized resolver agent
 which receives the base, current version, incoming version, task intents,
-worker summaries, and validation commands.
+Agent summaries, and validation commands.
 
 The resolver is deliberately excluded from this MVP. With one shared branch,
 exclusive same-file claims, batch barriers, and serialized direct commits,
@@ -713,7 +713,7 @@ Git repositories and an actual Codex-driven project:
    submodule, nested-repository, and otherwise unsupported states.
 3. Persist explicit session, task, claim, lease, and batch state transitions and
    return versioned JSON results with stable error classes.
-4. Run multiple workers against disjoint exact-file claims in one working tree.
+4. Run multiple Agents against disjoint exact-file claims in one working tree.
 5. Atomically reject overlapping claim sets and requeue blocked work without
    granting partial claims.
 6. Correctly snapshot creation, deletion, rename, symlink, and executable-bit
@@ -721,9 +721,9 @@ Git repositories and an actual Codex-driven project:
 7. Detect unclaimed and post-submission Git-visible modifications at workflow
    scans while documenting that transient writes between observations may be
    missed.
-8. Quarantine expired claims until Codex worker termination is proven or an
+8. Quarantine expired claims until Codex Agent termination is proven or an
    explicit user recovery confirmation is audited.
-9. Freeze persisted batch membership at the barrier and prevent late tasks from
+9. Freeze persisted ordered Batch Tasks at the barrier and prevent late tasks from
    joining that batch.
 10. Validate a frozen combined batch with focused and project checks, and reject
     a validation command that mutates a Git-visible path.

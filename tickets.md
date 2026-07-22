@@ -34,41 +34,41 @@ Work the **frontier**: any ticket whose blockers are all done. Several branches 
 
 **Blocked by:** Start and inspect a clean session.
 
-- [x] Tasks persist stable identity, creation order, title, intent, expected outcome, prerequisites, status, worker identity, and assignment token.
+- [x] Tasks persist stable identity, creation order, title, intent, expected outcome, prerequisites, status, Agent identity, and assignment token.
 - [x] Only tasks whose prerequisites succeeded in prior batches can become ready and be assigned.
-- [x] Assignment freezes planning fields for the worker attempt, and the first claim permanently freezes core task meaning.
-- [x] Replanning after assignment requires proven worker termination, token revocation, and a return to planned or ready.
+- [x] Assignment freezes planning fields for the Agent attempt, and the first claim permanently freezes core task meaning.
+- [x] Replanning after assignment requires proven Agent termination, token revocation, and a return to planned or ready.
 - [x] Canceling assigned claimless work requires proven termination and token revocation, and dependents must be canceled or replanned.
 
 ## Claim and submit one regular-file task
 
-**What to build:** Let one worker declare a regular-file write set, atomically claim it, edit it, review its complete baseline-to-current diff, and submit frozen snapshots with a structured handoff.
+**What to build:** Let one Agent declare a regular-file write set, atomically claim it, edit it, review its complete baseline-to-current diff, and submit frozen snapshots with a structured handoff.
 
 **Blocked by:** Plan dependencies and assign ready tasks.
 
 - [x] Read-only preflight can declare the complete initial write set and focused validation commands before any edit.
 - [x] Initial regular-file claims are acquired atomically only with the owning task's valid assignment token.
 - [x] Baseline snapshots represent absence or presence, regular-file type, exact-content hash, and executable bit.
-- [x] Every mutating worker command validates assignment and ownership, and submission rejects changed paths without an owner.
+- [x] Every mutating Agent command validates assignment and ownership, and submission rejects changed paths without an owner.
 - [x] Submission freezes all claimed path snapshots and records behavior changed, key decisions, validation expectations, and known risks.
 - [x] A submission whose claims all match baseline is recorded as a pending no-op rather than creating an empty commit.
 
-## Coordinate concurrent claims and worker leases
+## Coordinate concurrent claims and Agent leases
 
-**What to build:** Let multiple workers progress safely on disjoint paths while overlapping requests block atomically, active workers renew leases, and abandoned work remains quarantined until safe replacement.
+**What to build:** Let multiple Agents progress safely on disjoint paths while overlapping requests block atomically, active Agents renew leases, and abandoned work remains quarantined until safe replacement.
 
 **Blocked by:** Claim and submit one regular-file task.
 
-- [x] Multiple worker processes can edit disjoint exact-file claims concurrently in one working tree.
+- [x] Multiple Agent processes can edit disjoint exact-file claims concurrently in one working tree.
 - [x] An unavailable initial or expanded write set grants no partial claims and returns a typed blocked outcome.
 - [x] Blocked tasks retain no claims and can be requeued after relevant claims are released.
 - [x] An unused claim can be released only while its complete current snapshot equals its baseline.
-- [x] Every worker action renews its lease, and an explicit heartbeat supports long implementation periods.
+- [x] Every Agent action renews its lease, and an explicit heartbeat supports long implementation periods.
 - [x] Lease expiry quarantines ownership without releasing it; replacement requires proven termination or audited user confirmation and receives a new token.
 
 ## Support the complete Git-visible path model
 
-**What to build:** Let workers safely own file creation, deletion, rename, symlink, and executable-bit changes while rejecting path aliases and traversal that could escape exact-file attribution.
+**What to build:** Let Agents safely own file creation, deletion, rename, symlink, and executable-bit changes while rejecting path aliases and traversal that could escape exact-file attribution.
 
 **Blocked by:** Claim and submit one regular-file task.
 
@@ -94,24 +94,24 @@ Work the **frontier**: any ticket whose blockers are all done. Several branches 
 
 ## Freeze an attributable batch at the barrier
 
-**What to build:** Turn submitted independent tasks into a persisted frozen batch whose membership, order, base, path ownership, and submitted snapshots cannot change before validation.
+**What to build:** Turn submitted independent Tasks into a persisted frozen Batch whose ordered Tasks, order, base, path ownership, and submitted snapshots cannot change before validation.
 
-**Blocked by:** Coordinate concurrent claims and worker leases; Support the complete Git-visible path model; Detect and quarantine repository integrity drift.
+**Blocked by:** Coordinate concurrent claims and Agent leases; Support the complete Git-visible path model; Detect and quarantine repository integrity drift.
 
 - [x] A task joins the current collecting batch only after its initial claim succeeds.
-- [x] The barrier can run only after every active worker has submitted, blocked, failed, or been deliberately stopped.
-- [x] Freezing closes and persists membership order; blocked tasks and tasks becoming ready later wait for another batch.
-- [x] Every batch member is submitted and every changed non-ignored path has exactly one submitted owner.
-- [x] Stale submitted snapshots, unclaimed changes, index or branch drift, active workers, and quarantine prevent freezing.
+- [x] The barrier can run only after every active Agent has submitted, blocked, failed, or been deliberately stopped.
+- [x] Freezing closes and persists Task order; blocked tasks and tasks becoming ready later wait for another batch.
+- [x] Every Batch Task is submitted and every changed non-ignored path has exactly one submitted owner.
+- [x] Stale submitted snapshots, unclaimed changes, index or branch drift, active Agents, and quarantine prevent freezing.
 - [x] Tasks in one batch cannot depend on one another because prerequisites must succeed in an earlier batch.
 
 ## Run official validation on a frozen batch
 
-**What to build:** Run worker-focused and approved repository checks sequentially against the combined frozen batch and record reproducible outcomes without allowing validation to alter the work it authorizes.
+**What to build:** Run Agent-focused and approved repository checks sequentially against the combined frozen batch and record reproducible outcomes without allowing validation to alter the work it authorizes.
 
 **Blocked by:** Freeze an attributable batch at the barrier.
 
-- [x] Bandmaster, rather than workers, executes focused and repository-wide validation after the barrier.
+- [x] Bandmaster, rather than Agents, executes focused and repository-wide validation after the barrier.
 - [x] Each command has a stable name, argument vector or explicit shell script, canonical working directory, timeout, and declared environment overrides.
 - [x] Execution records resolved command details, status, duration, and bounded standard output and error.
 - [x] Commands use the repository root by default and inherit a documented minimal environment plus overrides.
@@ -120,14 +120,14 @@ Work the **frontier**: any ticket whose blockers are all done. Several branches 
 
 ## Repair failures without changing ownership
 
-**What to build:** Let a parent replace failed workers or reopen one or more original task owners after validation failure while retaining baselines, claims, partial edits, batch base, and attribution.
+**What to build:** Let a parent replace failed Agents or reopen one or more original task owners after validation failure while retaining baselines, claims, partial edits, batch base, and attribution.
 
-**Blocked by:** Run official validation on a frozen batch; Coordinate concurrent claims and worker leases.
+**Blocked by:** Run official validation on a frozen batch; Coordinate concurrent claims and Agent leases.
 
-- [x] Ordinary worker failure retains claims and partial edits and leaves an initially collecting batch open.
-- [x] Repair after a frozen-batch failure invalidates stale submissions and keeps the original membership and base closed to unrelated work.
-- [x] Replacement requires proven prior-worker termination, records diagnosis and intended repair, and creates a new assignment token.
-- [x] Replacement workers inherit existing claims and baselines and may atomically expand only into currently unowned paths.
+- [x] Ordinary Agent failure retains claims and partial edits and leaves an initially collecting batch open.
+- [x] Repair after a frozen-Batch failure invalidates stale submissions and keeps the Batch's original ordered Tasks and base closed to unrelated work.
+- [x] Replacement requires proven prior-Agent termination, records diagnosis and intended repair, and creates a new assignment token.
+- [x] Replacement Agents inherit existing claims and baselines and may atomically expand only into currently unowned paths.
 - [x] A repair requiring paths owned by multiple tasks reopens each original owner rather than transferring claims.
 - [x] The batch cannot return to the barrier until every reopened task submits again.
 
@@ -186,26 +186,26 @@ Work the **frontier**: any ticket whose blockers are all done. Several branches 
 
 **What to build:** Let a user stop orchestration while preserving uncommitted Git-visible work and durable ownership and audit records for inspection.
 
-**Blocked by:** Coordinate concurrent claims and worker leases; Detect and quarantine repository integrity drift.
+**Blocked by:** Coordinate concurrent claims and Agent leases; Detect and quarantine repository integrity drift.
 
-- [x] Abort enters an explicit aborting state and stops all workers before claims can be cleared.
-- [x] Worker termination is proven through parent-held handles or explicit audited user confirmation; ambiguous workers remain quarantined.
+- [x] Abort enters an explicit aborting state and stops all Agents before claims can be cleared.
+- [x] Agent termination is proven through parent-held handles or explicit audited user confirmation; ambiguous Agents remain quarantined.
 - [x] Safe claims are cleared only after termination while all uncommitted Git-visible changes remain in the working tree.
 - [x] Task ownership, structured handoffs, recovery decisions, and audit events remain inspectable after abort.
 - [x] A new session is rejected until the preserved working tree is made clean.
 
 ## Drive Bandmaster through the generated Codex skill
 
-**What to build:** Use the generated project-local skill in an actual Codex-driven project to identify parallel work, orchestrate workers, requeue contention, repair failures, finalize batches, and discover interrupted sessions.
+**What to build:** Use the generated project-local skill in an actual Codex-driven project to identify parallel work, orchestrate Agents, requeue contention, repair failures, finalize batches, and discover interrupted sessions.
 
 **Blocked by:** Repair failures without changing ownership; Advance dependent batches and complete a session; Abort active work without losing edits.
 
 - [x] The generated skill invokes Bandmaster only when at least two tasks are independently implementable and testable.
-- [x] The parent remains the sole orchestrator, starts all currently unblocked workers, and never delegates agent-spawning authority.
-- [x] Workers use stable JSON commands and tokens, claim before writing, heartbeat, avoid Git mutation, review their diffs, submit handoffs, and stop editing.
-- [x] The parent requeues blocked workers, waits for barriers, diagnoses validation failures, and assigns repairs to original owners.
-- [x] Interrupted sessions are reported with an offer to resume instead of silently starting new workers.
-- [x] Lost worker handles preserve quarantine and require explicit user confirmation before replacement.
+- [x] The parent remains the sole orchestrator, starts all currently unblocked Agents, and never delegates agent-spawning authority.
+- [x] Agents use stable JSON commands and tokens, claim before writing, heartbeat, avoid Git mutation, review their diffs, submit handoffs, and stop editing.
+- [x] The parent requeues blocked Agents, waits for barriers, diagnoses validation failures, and assigns repairs to original owners.
+- [x] Interrupted sessions are reported with an offer to resume instead of silently starting new Agents.
+- [x] Lost Agent handles preserve quarantine and require explicit user confirmation before replacement.
 
 ## Prove MVP acceptance across supported platforms
 
