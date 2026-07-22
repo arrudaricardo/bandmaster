@@ -48,6 +48,31 @@ A worker edits only its assigned task. It must use its token on every worker com
 Before stopping, the worker reviews its owned diff with 'bandmaster task diff <task-id> --token <token> --json', then submits a structured handoff using 'bandmaster task submit <task-id> --token <token> --behavior-changed <text> --key-decisions <text> --validation-expectations <text> --known-risks <text> --json'. It then stops editing and reports the handoff to the parent. Do not keep editing after submission or race the frozen barrier. If it cannot claim safely, it reports the blocked result and exits without writing.
 `
 
+const generatedDebugSkill = `---
+name: debug-bandmaster
+description: Diagnose and explain Bandmaster runtime behavior from sanitized structured evidence. Use when asked to debug, diagnose, inspect, troubleshoot, or explain Bandmaster sessions, workers, tasks, claims, leases, batches, monitors, integrity, configuration, Git state, or orchestration failures.
+---
+
+# Debug Bandmaster
+
+Begin with the installed executable's sanitized evidence:
+
+1. Run 'bandmaster debug --json'. Do not initialize, repair, resume, sweep, or mutate state to obtain evidence.
+2. Check 'runtime.bandmaster_version', 'runtime.executable', Go/build identity, repository location, state schema, collection status, and revision stability. Report partial or best-effort evidence honestly.
+3. Interpret stable diagnostic codes, affected identities, evidence, and suggested supported CLI actions. Correlate derived workers with authoritative tasks, leases, and claims; do not invent a persisted Agent entity.
+4. Correlate runtime evidence with source and public-interface tests. Never request or expose assignment tokens, environment values, stored content, raw SQLite rows, arbitrary blobs, or a database dump. Use the unsafe option only with explicit authorization and only when the secret itself is necessary.
+
+For a changing reproduction, run 'bandmaster debug --watch --json' and consume the initial snapshot, semantic change records, collection errors/recovery, and heartbeats as NDJSON. Keep the selected session pinned unless the investigation explicitly needs '--follow-latest'.
+
+If the request is diagnosis-only, stop after explaining the evidence and likely source path. Do not edit code. If the user authorizes a fix, implement and test it, build a fresh executable with 'go build -o <temporary-path>/bandmaster ./cmd/bandmaster', reproduce using that exact executable, and verify with a fresh '<temporary-path>/bandmaster debug --json'. Never treat an old installed binary's snapshot as proof of the fix.
+`
+
+const generatedDebugSkillUI = `interface:
+  display_name: "Debug Bandmaster"
+  short_description: "Diagnose Bandmaster runtime behavior"
+  default_prompt: "Use $debug-bandmaster to diagnose this Bandmaster runtime issue."
+`
+
 type configuration struct {
 	Version             int               `yaml:"version"`
 	WorkerLeaseDuration string            `yaml:"worker_lease_duration"`
@@ -120,14 +145,23 @@ func decodeConfiguration(content []byte) (configuration, *Error) {
 	return config, nil
 }
 
-func (p *Project) Initialize() (InitResult, *Error) {
+func (p *Project) Initialize(options InitOptions) (InitResult, *Error) {
 	configPath := filepath.Join(p.Root, ".bandmaster.yaml")
 	skillPath := filepath.Join(p.Root, ".agents", "skills", "bandmaster", "SKILL.md")
+	debugSkillPath := filepath.Join(p.Root, ".agents", "skills", "debug-bandmaster", "SKILL.md")
+	debugSkillUIPath := filepath.Join(p.Root, ".agents", "skills", "debug-bandmaster", "agents", "openai.yaml")
 	if projectError := validateLocalPath(p.Root, ".bandmaster.yaml"); projectError != nil {
 		return InitResult{}, projectError
 	}
 	if projectError := validateLocalPath(p.Root, filepath.Join(".agents", "skills", "bandmaster", "SKILL.md")); projectError != nil {
 		return InitResult{}, projectError
+	}
+	if options.InstallDebugSkill {
+		for _, path := range []string{filepath.Join(".agents", "skills", "debug-bandmaster", "SKILL.md"), filepath.Join(".agents", "skills", "debug-bandmaster", "agents", "openai.yaml")} {
+			if projectError := validateLocalPath(p.Root, path); projectError != nil {
+				return InitResult{}, projectError
+			}
+		}
 	}
 	if _, err := os.Stat(configPath); errors.Is(err, os.ErrNotExist) {
 		commands, projectError := detectValidation(p.Root)
@@ -152,9 +186,20 @@ func (p *Project) Initialize() (InitResult, *Error) {
 	if err := writeFile(skillPath, []byte(generatedSkill), 0o644); err != nil {
 		return InitResult{}, internal("write generated Codex skill", err)
 	}
+	debugSkillResultPath := ""
+	if options.InstallDebugSkill {
+		if err := writeFile(debugSkillPath, []byte(generatedDebugSkill), 0o644); err != nil {
+			return InitResult{}, internal("write generated Bandmaster debugging skill", err)
+		}
+		if err := writeFile(debugSkillUIPath, []byte(generatedDebugSkillUI), 0o644); err != nil {
+			return InitResult{}, internal("write generated Bandmaster debugging skill metadata", err)
+		}
+		debugSkillResultPath = ".agents/skills/debug-bandmaster/SKILL.md"
+	}
 	return InitResult{
 		ConfigPath:       ".bandmaster.yaml",
 		SkillPath:        ".agents/skills/bandmaster/SKILL.md",
+		DebugSkillPath:   debugSkillResultPath,
 		ValidationDigest: status.ValidationDigest,
 		Approved:         status.Approved,
 	}, nil

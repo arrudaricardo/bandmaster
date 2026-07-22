@@ -2,6 +2,20 @@ package cli
 
 import "fmt"
 
+func parseInitOptions(args []string) (bool, error) {
+	installDebugSkill := false
+	for _, arg := range args {
+		if arg != "--debug-skill" {
+			return false, fmt.Errorf("unknown option %s", arg)
+		}
+		if installDebugSkill {
+			return false, fmt.Errorf("option --debug-skill may be specified only once")
+		}
+		installDebugSkill = true
+	}
+	return installDebugSkill, nil
+}
+
 func parseTaskOptions(args []string, allowed map[string]bool) (map[string][]string, error) {
 	options := make(map[string][]string)
 	for index := 0; index < len(args); index += 2 {

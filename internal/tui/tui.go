@@ -14,13 +14,8 @@ import (
 
 const refreshInterval = 2 * time.Second
 
-type snapshot struct {
-	session *project.Session
-	tasks   []project.Task
-}
-
 type snapshotMsg struct {
-	snapshot snapshot
+	snapshot project.DebugSnapshot
 	err      error
 }
 
@@ -28,7 +23,8 @@ type tickMsg time.Time
 
 type model struct {
 	project    *project.Project
-	snapshot   snapshot
+	options    project.DebugOptions
+	debug      project.DebugSnapshot
 	err        error
 	refreshing bool
 	height     int
@@ -36,13 +32,18 @@ type model struct {
 
 // Run starts the interactive, read-only Bandmaster status dashboard.
 func Run(p *project.Project, input io.Reader, output io.Writer) error {
-	program := tea.NewProgram(model{project: p, refreshing: true}, tea.WithAltScreen(), tea.WithInput(input), tea.WithOutput(output))
+	return RunDebug(p, project.DebugOptions{}, input, output)
+}
+
+// RunDebug renders the normalized debug model as Bandmaster's canonical dashboard.
+func RunDebug(p *project.Project, options project.DebugOptions, input io.Reader, output io.Writer) error {
+	program := tea.NewProgram(model{project: p, options: options, refreshing: true}, tea.WithAltScreen(), tea.WithInput(input), tea.WithOutput(output))
 	_, err := program.Run()
 	return err
 }
 
 func (m model) Init() tea.Cmd {
-	return loadSnapshot(m.project)
+	return loadSnapshot(m.project, m.options)
 }
 
 func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
@@ -55,16 +56,16 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "r":
 			m.refreshing = true
-			return m, loadSnapshot(m.project)
+			return m, loadSnapshot(m.project, m.options)
 		}
 	case snapshotMsg:
-		m.snapshot = message.snapshot
+		m.debug = message.snapshot
 		m.err = message.err
 		m.refreshing = false
 		return m, waitForRefresh()
 	case tickMsg:
 		m.refreshing = true
-		return m, loadSnapshot(m.project)
+		return m, loadSnapshot(m.project, m.options)
 	}
 	return m, nil
 }
@@ -84,25 +85,34 @@ func renderDashboard(m model) string {
 		content.WriteString("  Run \033[1mbandmaster init\033[0m in a supported Git repository, then press \033[1mr\033[0m.\n")
 		return content.String()
 	}
-	if m.snapshot.session == nil {
+	debugSnapshot := m.debug
+	if debugSnapshot.Session == nil {
 		content.WriteString("  \033[1;33mNo Bandmaster session has been recorded.\033[0m\n\n")
+		content.WriteString(fmt.Sprintf("  State: %s · Collection: %s\n", debugSnapshot.State.Initialization, debugSnapshot.Collection.Status))
 		content.WriteString("  Start when your repository is clean:\n  \033[1mbandmaster session start\033[0m\n")
 		return content.String()
 	}
 
-	session := m.snapshot.session
+	session := debugSnapshot.Session
 	content.WriteString(fmt.Sprintf("  Session  %s  %s\n", statusBadge(session.Status), dim(shortID(session.ID))))
-	content.WriteString(fmt.Sprintf("  Branch   \033[1m%s\033[0m  %s\n", session.StartingBranch, dim(shortID(session.StartingCommit))))
-	if session.Monitor != nil {
-		content.WriteString(fmt.Sprintf("  Monitor  %s  %s\n", statusBadge(session.Monitor.Status), dim(session.Monitor.HeartbeatAt)))
+	content.WriteString(fmt.Sprintf("  Runtime  \033[1mbandmaster %s\033[0m  %s · %s/%s\n", debugSnapshot.Runtime.BandmasterVersion, debugSnapshot.Runtime.GoVersion, debugSnapshot.Runtime.GOOS, debugSnapshot.Runtime.GOARCH))
+	content.WriteString(fmt.Sprintf("  Branch   \033[1m%s\033[0m  %s", debugSnapshot.Repository.Branch, dim(shortID(debugSnapshot.Repository.Head))))
+	if len(debugSnapshot.Repository.ChangedPaths) > 0 {
+		content.WriteString(fmt.Sprintf("  · %d changed path(s)", len(debugSnapshot.Repository.ChangedPaths)))
 	}
-	if len(session.IntegrityViolations) > 0 {
-		content.WriteString(fmt.Sprintf("  \033[1;31m%d unresolved integrity violation(s)\033[0m\n", len(session.IntegrityViolations)))
+	content.WriteString("\n")
+	content.WriteString(fmt.Sprintf("  State    %s · config %s · collection %s\n", debugSnapshot.State.Initialization, debugSnapshot.Configuration.Status, debugSnapshot.Collection.Status))
+	if len(debugSnapshot.Monitors) > 0 {
+		monitor := debugSnapshot.Monitors[len(debugSnapshot.Monitors)-1]
+		content.WriteString(fmt.Sprintf("  Monitor  %s  %s\n", statusBadge(monitor.Status), dim(monitor.HeartbeatAt)))
+	}
+	if len(debugSnapshot.Integrity) > 0 {
+		content.WriteString(fmt.Sprintf("  \033[1;31m%d integrity violation record(s)\033[0m\n", len(debugSnapshot.Integrity)))
 	}
 
 	content.WriteString("\n  \033[1mWork overview\033[0m\n")
 	content.WriteString("  ────────────────────────────────────────────────────────────────\n")
-	counts := taskCounts(m.snapshot.tasks)
+	counts := taskCounts(debugSnapshot.Tasks)
 	if len(counts) == 0 {
 		content.WriteString("  No tasks planned yet.\n")
 	} else {
@@ -111,13 +121,13 @@ func renderDashboard(m model) string {
 		}
 	}
 
-	if len(m.snapshot.tasks) > 0 {
+	if len(debugSnapshot.Tasks) > 0 {
 		content.WriteString("\n  \033[1mTasks\033[0m\n")
 		content.WriteString("  \033[2mSTATUS              TASK                                      OWNER / CLAIMS\033[0m\n")
 		content.WriteString("  ─────────────────────────────────────────────────────────────────────────\n")
-		for index, task := range m.snapshot.tasks {
+		for index, task := range debugSnapshot.Tasks {
 			if index == 12 {
-				content.WriteString(fmt.Sprintf("  \033[2m… %d more task(s); use task list --json for the complete record\033[0m\n", len(m.snapshot.tasks)-index))
+				content.WriteString(fmt.Sprintf("  \033[2m… %d more task(s); use debug --json for the complete record\033[0m\n", len(debugSnapshot.Tasks)-index))
 				break
 			}
 			owner := task.WorkerIdentity
@@ -127,23 +137,48 @@ func renderDashboard(m model) string {
 			content.WriteString(fmt.Sprintf("  %-25s %-41s %s · %d claim(s)\n", task.Status, truncate(task.Title, 39), owner, len(task.Claims)))
 		}
 	}
+	if len(debugSnapshot.Workers) > 0 {
+		content.WriteString("\n  \033[1mWorkers, leases, and claims\033[0m\n")
+		for _, worker := range debugSnapshot.Workers {
+			lease := "no active lease"
+			if worker.Lease != nil {
+				lease = fmt.Sprintf("lease %s until %s", worker.Lease.Status, worker.Lease.ExpiresAt)
+			}
+			content.WriteString(fmt.Sprintf("  \033[1m%s\033[0m  %s · task %s\n", worker.WorkerIdentity, lease, shortID(worker.ActiveTaskID)))
+			for _, claimPath := range worker.ClaimPaths {
+				content.WriteString(fmt.Sprintf("    claim  %s\n", claimPath))
+			}
+		}
+	}
+	if len(debugSnapshot.Batches) > 0 {
+		content.WriteString("\n  \033[1mBatches\033[0m\n")
+		for _, batch := range debugSnapshot.Batches {
+			content.WriteString(fmt.Sprintf("  %s  %s · %d member(s) · %d path(s)\n", statusBadge(batch.Status), shortID(batch.ID), len(batch.MemberTaskIDs), len(batch.Manifest)))
+		}
+	}
+	if len(debugSnapshot.Diagnostics) > 0 {
+		content.WriteString("\n  \033[1mActionable diagnostics\033[0m\n")
+		for index, diagnostic := range debugSnapshot.Diagnostics {
+			if index == 8 {
+				break
+			}
+			action := "inspect debug --json"
+			if len(diagnostic.SuggestedActions) > 0 {
+				action = diagnostic.SuggestedActions[0]
+			}
+			content.WriteString(fmt.Sprintf("  %-24s %-8s %s\n", diagnostic.Code, diagnostic.Severity, action))
+		}
+	}
 	return content.String()
 }
 
-func loadSnapshot(p *project.Project) tea.Cmd {
+func loadSnapshot(p *project.Project, options project.DebugOptions) tea.Cmd {
 	return func() tea.Msg {
-		session, projectError := p.InspectSession()
-		if projectError != nil {
-			if projectError.Code == "session_not_found" {
-				return snapshotMsg{}
-			}
-			return snapshotMsg{err: fmt.Errorf("%s", projectError.Message)}
-		}
-		_, tasks, projectError := p.ListTasks()
+		snapshot, projectError := p.Debug(options)
 		if projectError != nil {
 			return snapshotMsg{err: fmt.Errorf("%s", projectError.Message)}
 		}
-		return snapshotMsg{snapshot: snapshot{session: &session, tasks: tasks.Tasks}}
+		return snapshotMsg{snapshot: snapshot}
 	}
 }
 
@@ -153,7 +188,7 @@ func waitForRefresh() tea.Cmd {
 	})
 }
 
-func taskCounts(tasks []project.Task) map[string]int {
+func taskCounts(tasks []project.DebugTask) map[string]int {
 	counts := make(map[string]int)
 	for _, task := range tasks {
 		counts[task.Status]++

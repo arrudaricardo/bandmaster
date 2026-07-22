@@ -30,8 +30,13 @@ type Project struct {
 type InitResult struct {
 	ConfigPath       string `json:"config_path"`
 	SkillPath        string `json:"skill_path"`
+	DebugSkillPath   string `json:"debug_skill_path,omitempty"`
 	ValidationDigest string `json:"validation_digest"`
 	Approved         bool   `json:"approved"`
+}
+
+type InitOptions struct {
+	InstallDebugSkill bool
 }
 
 type ConfigStatus struct {

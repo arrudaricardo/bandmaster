@@ -4,12 +4,14 @@ func commandName(args []string) string {
 	switch {
 	case len(args) == 1 && args[0] == "version":
 		return "version"
-	case len(args) == 1 && args[0] == "init":
+	case len(args) >= 1 && args[0] == "init":
 		return "init"
 	case len(args) == 1 && args[0] == "tui":
 		return "tui"
 	case len(args) == 1 && args[0] == "doctor":
 		return "doctor"
+	case len(args) >= 1 && args[0] == "debug":
+		return "debug"
 	case len(args) == 2 && args[0] == "config" && args[1] == "status":
 		return "config status"
 	case len(args) == 3 && args[0] == "config" && args[1] == "approve":

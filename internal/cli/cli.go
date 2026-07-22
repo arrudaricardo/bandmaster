@@ -27,7 +27,26 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		stdout = prettyJSONOutput{Writer: stdout}
 	}
 	if command == "" {
-		return writeError(stdout, stderr, jsonOutput, "unknown", "invalid_arguments", "usage: bandmaster version | doctor | tui | init | config status | config approve <digest> | session <start|inspect|pause|resume|finish|abort> [--dry-run] [--termination-confirmation <text>] | integrity recover --confirmation <text> | finalization recover [--confirmation <text>] | batch <freeze|validate|commit|inspect|abandon> [--reason <text> --confirmation <text>] | task <create|list|inspect|assign|replan|cancel|requeue|recover|repair|preflight|claim|release|heartbeat|diff|submit> [--json [--pretty]]", false, exitInvalid)
+		return writeError(stdout, stderr, jsonOutput, "unknown", "invalid_arguments", "usage: bandmaster version | doctor | debug [--json] [--watch] | tui | init [--debug-skill] | config status | config approve <digest> | session <start|inspect|pause|resume|finish|abort> [--dry-run] [--termination-confirmation <text>] | integrity recover --confirmation <text> | finalization recover [--confirmation <text>] | batch <freeze|validate|commit|inspect|abandon> [--reason <text> --confirmation <text>] | task <create|list|inspect|assign|replan|cancel|requeue|recover|repair|preflight|claim|release|heartbeat|diff|submit> [--json [--pretty]]", false, exitInvalid)
+	}
+	installDebugSkill := false
+	if command == "init" {
+		var optionError error
+		installDebugSkill, optionError = parseInitOptions(args[1:])
+		if optionError != nil {
+			return writeError(stdout, stderr, jsonOutput, command, "invalid_arguments", optionError.Error(), false, exitInvalid)
+		}
+	}
+	var debugOptions debugCLIOptions
+	if command == "debug" {
+		var optionError error
+		debugOptions, optionError = parseDebugOptions(args[1:])
+		if optionError != nil {
+			return writeError(stdout, stderr, jsonOutput, command, "invalid_arguments", optionError.Error(), false, exitInvalid)
+		}
+		if debugOptions.watch && prettyJSON {
+			return writeError(stdout, stderr, jsonOutput, command, "invalid_arguments", "--pretty is not supported with --watch.", false, exitInvalid)
+		}
 	}
 	abortConfirmation := ""
 	abortDryRun := false
@@ -58,6 +77,9 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	if projectError != nil {
 		return writeProjectError(stdout, stderr, jsonOutput, command, projectError)
 	}
+	if command == "debug" {
+		return runDebug(currentProject, debugOptions, jsonOutput, stdout, stderr)
+	}
 	if command == "monitor run" {
 		if projectError := currentProject.RunIntegrityMonitor(args[2], args[3]); projectError != nil {
 			return projectError.ExitCode
@@ -68,7 +90,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		if jsonOutput {
 			return writeError(stdout, stderr, true, command, "invalid_arguments", "The interactive TUI does not support --json.", false, exitInvalid)
 		}
-		if err := tui.Run(currentProject, os.Stdin, stdout); err != nil {
+		executable, _ := os.Executable()
+		if err := tui.RunDebug(currentProject, project.DebugOptions{Version: Version, Executable: executable}, os.Stdin, stdout); err != nil {
 			return writeError(stdout, stderr, false, command, "tui_failed", fmt.Sprintf("Run interactive TUI: %v", err), false, exitInternal)
 		}
 		return 0
@@ -93,7 +116,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		}
 		return writeHuman(stdout, "Bandmaster found %d recovery issue(s); rerun with --json for structured evidence.\n", len(result.Findings))
 	case "init":
-		result, projectError := currentProject.Initialize()
+		result, projectError := currentProject.Initialize(project.InitOptions{InstallDebugSkill: installDebugSkill})
 		if projectError != nil {
 			return writeProjectError(stdout, stderr, jsonOutput, command, projectError)
 		}
@@ -101,6 +124,9 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			return writeJSON(stdout, envelope{SchemaVersion: "1", Command: command, Success: true, Result: result})
 		}
 		message := fmt.Sprintf("Initialized Bandmaster.\nValidation digest: %s\nApproved: %t\n", result.ValidationDigest, result.Approved)
+		if result.DebugSkillPath != "" {
+			message += fmt.Sprintf("Debug skill: %s\n", result.DebugSkillPath)
+		}
 		if !result.Approved {
 			message += approvalGuidance(result.ValidationDigest)
 		}

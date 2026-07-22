@@ -48,7 +48,7 @@ Codex was used throughout Bandmaster's development as both the parent orchestrat
 - **Git integrity protection** — a monitor detects unclaimed edits, submitted-path drift, index/HEAD/branch drift, and unsafe validation mutations.
 - **A real commit barrier** — batch membership is frozen, validation is ordered and recorded, then changed tasks are committed in deterministic order.
 - **Recovery over guesswork** — failed or interrupted finalization restores the baseline while preserving observed edits; ambiguous state is quarantined.
-- **A generated Codex skill** — `bandmaster init` installs project-local instructions for a parent-led, token-based worker protocol.
+- **Generated Codex skills** — `bandmaster init` installs orchestration guidance; `--debug-skill` opts into separate evidence-led runtime debugging guidance.
 
 ## Quick start
 
@@ -69,12 +69,14 @@ Set up Bandmaster safely in the current repository.
 Use JSON output for every Bandmaster command and report any unsupported platform, download, checksum, or initialization failure without guessing around it.
 ```
 
-`init` writes `.bandmaster.yaml` and installs `.agents/skills/bandmaster/SKILL.md`. The configuration is intentionally unapproved at first: review the validation commands before authorizing them. Approval is local to the clone and invalidates whenever the configuration changes.
+`init` writes `.bandmaster.yaml` and installs `.agents/skills/bandmaster/SKILL.md`. Add `--debug-skill` to also install the dedicated `.agents/skills/debug-bandmaster/` skill with UI metadata. Without that flag, init neither creates nor modifies the debugging skill. The configuration is intentionally unapproved at first: review the validation commands before authorizing them. Approval is local to the clone and invalidates whenever the configuration changes.
 
 ### Manual setup
 
 ```sh
 bandmaster init
+# Optional: install the dedicated runtime-debugging skill.
+bandmaster init --debug-skill
 bandmaster config status
 # Review .bandmaster.yaml, then explicitly approve its displayed digest.
 bandmaster config approve <digest>
@@ -213,6 +215,40 @@ Doctor never repairs state, runs migrations, changes Git, changes monitor state,
 or appends audit events. Use only a command listed in the finding's
 `supported_actions` after inspecting its evidence.
 
+### Debug runtime and orchestration state
+
+`debug` is the broader, strictly read-only evidence surface. It works before
+Bandmaster initialization and returns useful partial evidence when state is
+locked, malformed, or incompatible:
+
+```sh
+bandmaster debug
+bandmaster debug --json
+bandmaster debug --session <session-id> --history-limit 100 --json
+bandmaster debug --complete-history --json
+```
+
+The versioned JSON snapshot normalizes runtime/build identity, project and state
+locations, configuration approval, Git observations, sessions, tasks, derived
+workers, leases, claims, batches, manifests, validation summaries, monitors,
+integrity violations, audit events, and actionable diagnostics. Authority-bearing
+values and stored content are redacted; safe presence, fingerprints, hashes,
+sizes, statuses, and timings remain. `--unsafe` reveals only the explicitly
+supported authority fields and should be used only with authorization.
+
+For changing reproductions, consume the NDJSON stream:
+
+```sh
+bandmaster debug --watch --json
+bandmaster debug --watch --follow-latest --interval 1s --json
+```
+
+The first record is a complete snapshot. Later records contain semantic changes,
+ten-second heartbeats, transient collection errors, and recovery notices. Watch
+mode pins its initial session unless `--follow-latest` is requested. Polling
+intervals below 250 ms are rejected. `bandmaster debug --watch` opens the same
+normalized live terminal dashboard as the compatibility alias `bandmaster tui`.
+
 ## Safety model
 
 Bandmaster favors **preserving work and making uncertainty visible** over guessing.
@@ -237,7 +273,7 @@ Bandmaster's generated skill is designed for a **single parent orchestrator** an
 5. If a session is discovered after a parent interruption, report it and offer to resume—do not silently start replacement workers.
 6. Lost worker handles require parent-held termination proof or explicit audited user confirmation before replacement.
 
-The generated instructions live at `.agents/skills/bandmaster/SKILL.md` after initialization.
+The generated orchestration instructions live at `.agents/skills/bandmaster/SKILL.md` after initialization. When requested with `bandmaster init --debug-skill`, evidence-led debugging instructions live separately at `.agents/skills/debug-bandmaster/SKILL.md`.
 
 ## Live status dashboard
 
