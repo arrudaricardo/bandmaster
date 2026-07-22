@@ -24,7 +24,7 @@ type AbortTaskPlan struct {
 	TaskID        string `json:"task_id"`
 	CurrentStatus string `json:"current_status"`
 	TargetStatus  string `json:"target_status"`
-	Worker        string `json:"worker_identity,omitempty"`
+	Agent         string `json:"agent_identity,omitempty"`
 }
 
 type AbortClaimPlan struct {
@@ -78,20 +78,20 @@ func (p *Project) planAbort(queryer databaseQuerier, terminationConfirmation str
 		Blockers:           []AbortBlocker{},
 	}
 
-	taskRows, err := queryer.Query(`SELECT id, status, COALESCE(worker_identity, '') FROM tasks WHERE session_id = ? AND status NOT IN ('committed', 'no_op', 'canceled') ORDER BY creation_order`, session.ID)
+	taskRows, err := queryer.Query(`SELECT id, status, COALESCE(agent_identity, '') FROM tasks WHERE session_id = ? AND status NOT IN ('committed', 'no_op', 'canceled') ORDER BY creation_order`, session.ID)
 	if err != nil {
 		return AbortPlan{}, sessionInternal(session.ID, "plan abort tasks", err)
 	}
-	workers := 0
+	agents := 0
 	for taskRows.Next() {
 		var task AbortTaskPlan
-		if err := taskRows.Scan(&task.TaskID, &task.CurrentStatus, &task.Worker); err != nil {
+		if err := taskRows.Scan(&task.TaskID, &task.CurrentStatus, &task.Agent); err != nil {
 			taskRows.Close()
 			return AbortPlan{}, sessionInternal(session.ID, "read abort task plan", err)
 		}
 		task.TargetStatus = "quarantined"
-		if task.Worker != "" {
-			workers++
+		if task.Agent != "" {
+			agents++
 		}
 		plan.AffectedTasks = append(plan.AffectedTasks, task)
 	}
@@ -213,8 +213,8 @@ func (p *Project) planAbort(queryer databaseQuerier, terminationConfirmation str
 		plan.PreservedArtifacts = append(plan.PreservedArtifacts, AbortArtifactPlan{Kind: artifact.kind, Count: count})
 	}
 
-	if workers != 0 && strings.TrimSpace(terminationConfirmation) == "" {
-		plan.Blockers = append(plan.Blockers, AbortBlocker{Code: "worker_termination_confirmation_required", Message: "Abort requires proof that every assigned worker has stopped; provide --termination-confirmation."})
+	if agents != 0 && strings.TrimSpace(terminationConfirmation) == "" {
+		plan.Blockers = append(plan.Blockers, AbortBlocker{Code: "agent_termination_confirmation_required", Message: "Abort requires proof that every assigned agent has stopped; provide --termination-confirmation."})
 	}
 	if session.Status == "finalizing" || len(plan.Journals) != 0 {
 		plan.Blockers = append(plan.Blockers, AbortBlocker{Code: "finalization_recovery_required", Message: "Finalizing Git state must be reconciled with finalization recover before abort can release ownership."})
@@ -273,7 +273,7 @@ func (p *Project) AbortSession(terminationConfirmation string) (Session, *Error)
 			}
 			return Session{}, abortCleanupError(plan.SessionID, "confirm task quarantine", err)
 		}
-		if _, err := tx.Exec(`INSERT INTO task_audit_events(session_id, task_id, event, from_status, to_status, worker_identity, termination_proof, occurred_at) VALUES(?, ?, 'session_aborted', ?, 'quarantined', ?, ?, ?)`, plan.SessionID, task.TaskID, task.CurrentStatus, nullableString(task.Worker), nullableString(terminationConfirmation), now); err != nil {
+		if _, err := tx.Exec(`INSERT INTO task_audit_events(session_id, task_id, event, from_status, to_status, agent_identity, termination_proof, occurred_at) VALUES(?, ?, 'session_aborted', ?, 'quarantined', ?, ?, ?)`, plan.SessionID, task.TaskID, task.CurrentStatus, nullableString(task.Agent), nullableString(terminationConfirmation), now); err != nil {
 			return Session{}, abortCleanupError(plan.SessionID, "audit task abort", err)
 		}
 	}

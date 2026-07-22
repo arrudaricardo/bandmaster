@@ -61,7 +61,7 @@ func TestDebugLeaseDiagnosticsIgnoreTerminalHistoricalLeases(t *testing.T) {
 	snapshot := DebugSnapshot{
 		Session: &DebugSession{ID: "session-debug"},
 		Tasks: []DebugTask{
-			{ID: "task-live", Status: "assigned", WorkerIdentity: "worker-live", AssignmentTokenPresent: true, Lease: expiredLease, Prerequisites: []string{}, Claims: []DebugClaim{}},
+			{ID: "task-live", Status: "assigned", AgentIdentity: "agent-live", AssignmentTokenPresent: true, Lease: expiredLease, Prerequisites: []string{}, Claims: []DebugClaim{}},
 			{ID: "task-canceled", Status: "canceled", Lease: expiredLease, Prerequisites: []string{}, Claims: []DebugClaim{}},
 			{ID: "task-committed", Status: "committed", Lease: expiredLease, Prerequisites: []string{}, Claims: []DebugClaim{}},
 			{ID: "task-no-op", Status: "no_op", Lease: expiredLease, Prerequisites: []string{}, Claims: []DebugClaim{}},

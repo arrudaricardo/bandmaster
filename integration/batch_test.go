@@ -20,19 +20,19 @@ type batchResponse struct {
 		BaseCommit    string `json:"base_commit"`
 		Status        string `json:"status"`
 		FrozenAt      string `json:"frozen_at"`
-		Members       []struct {
-			TaskID          string `json:"task_id"`
-			MembershipOrder int64  `json:"membership_order"`
-			TaskOrder       int64  `json:"task_creation_order"`
-			Status          string `json:"status"`
-			Outcome         string `json:"submission_outcome"`
-		} `json:"members"`
+		Tasks         []struct {
+			TaskID        string `json:"task_id"`
+			TaskOrder     int64  `json:"task_order"`
+			CreationOrder int64  `json:"creation_order"`
+			Status        string `json:"status"`
+			Outcome       string `json:"submission_outcome"`
+		} `json:"tasks"`
 		Manifest []struct {
-			TaskID          string `json:"task_id"`
-			MembershipOrder int64  `json:"membership_order"`
-			ClaimOrder      int64  `json:"claim_order"`
-			Path            string `json:"path"`
-			Baseline        struct {
+			TaskID     string `json:"task_id"`
+			TaskOrder  int64  `json:"task_order"`
+			ClaimOrder int64  `json:"claim_order"`
+			Path       string `json:"path"`
+			Baseline   struct {
 				Presence    string `json:"presence"`
 				Type        string `json:"type"`
 				ContentHash string `json:"content_hash"`
@@ -89,7 +89,7 @@ type batchResponse struct {
 	} `json:"error"`
 }
 
-func TestBatchFreezePersistsOrderedAttributableMembership(t *testing.T) {
+func TestBatchFreezePersistsOrderedAttributableTaskship(t *testing.T) {
 	repo := approvedCleanRepository(t)
 	writeFile(t, filepath.Join(repo, "left.txt"), "left baseline\n")
 	writeFile(t, filepath.Join(repo, "right.txt"), "right baseline\n")
@@ -100,8 +100,8 @@ func TestBatchFreezePersistsOrderedAttributableMembership(t *testing.T) {
 	left := successfulTaskCommand(t, repo, "create", "--title", "Edit left", "--intent", "Change left behavior", "--expected-outcome", "Left is updated")
 	right := successfulTaskCommand(t, repo, "create", "--title", "Inspect right", "--intent", "Keep right behavior", "--expected-outcome", "Right remains unchanged")
 	dependent := successfulTaskCommand(t, repo, "create", "--title", "Use left", "--intent", "Wait for accepted left work", "--expected-outcome", "Starts in a later batch", "--prerequisite", left.Result.ID)
-	leftAssignment := successfulTaskCommand(t, repo, "assign", left.Result.ID, "--worker", "worker-batch-left")
-	rightAssignment := successfulTaskCommand(t, repo, "assign", right.Result.ID, "--worker", "worker-batch-right")
+	leftAssignment := successfulTaskCommand(t, repo, "assign", left.Result.ID, "--agent", "agent-batch-left")
+	rightAssignment := successfulTaskCommand(t, repo, "assign", right.Result.ID, "--agent", "agent-batch-right")
 
 	preflight := runBandmaster(t, repo, "task", "preflight", left.Result.ID, "--token", leftAssignment.Result.AssignmentToken, "--path", "left.txt", "--json")
 	if preflight.exitCode != 0 {
@@ -117,21 +117,21 @@ func TestBatchFreezePersistsOrderedAttributableMembership(t *testing.T) {
 		t.Fatalf("independent initial claims did not join one collecting batch: left=%+v right=%+v", leftClaimed.Result, rightClaimed.Result)
 	}
 
-	contender := successfulTaskCommand(t, repo, "create", "--title", "Contend for left", "--intent", "Prove blocked work stays out", "--expected-outcome", "No batch membership")
-	contenderAssignment := successfulTaskCommand(t, repo, "assign", contender.Result.ID, "--worker", "worker-batch-contender")
+	contender := successfulTaskCommand(t, repo, "create", "--title", "Contend for left", "--intent", "Prove blocked work stays out", "--expected-outcome", "Not included in the Batch")
+	contenderAssignment := successfulTaskCommand(t, repo, "assign", contender.Result.ID, "--agent", "agent-batch-contender")
 	contention := runBandmaster(t, repo, "task", "claim", contender.Result.ID, "--token", contenderAssignment.Result.AssignmentToken, "--path", "left.txt", "--json")
 	assertTaskError(t, contention, 2, "claim_unavailable", true)
 	if blockedTask := successfulTaskCommand(t, repo, "inspect", contender.Result.ID); blockedTask.Result.BatchID != "" || len(blockedTask.Result.Claims) != 0 {
 		t.Fatalf("blocked task joined the collecting batch: %+v", blockedTask.Result)
 	}
 
-	assertBatchError(t, runBandmaster(t, repo, "batch", "freeze", "--json"), 2, "active_workers", true)
+	assertBatchError(t, runBandmaster(t, repo, "batch", "freeze", "--json"), 2, "active_agents", true)
 	writeFile(t, filepath.Join(repo, "left.txt"), "left submitted\n")
 	submitBatchTask(t, repo, left.Result.ID, leftAssignment.Result.AssignmentToken)
-	assertBatchError(t, runBandmaster(t, repo, "batch", "freeze", "--json"), 2, "active_workers", true)
+	assertBatchError(t, runBandmaster(t, repo, "batch", "freeze", "--json"), 2, "active_agents", true)
 	submitBatchTask(t, repo, right.Result.ID, rightAssignment.Result.AssignmentToken)
 
-	dependentAssignment := runBandmaster(t, repo, "task", "assign", dependent.Result.ID, "--worker", "worker-dependent-too-early", "--json")
+	dependentAssignment := runBandmaster(t, repo, "task", "assign", dependent.Result.ID, "--agent", "agent-dependent-too-early", "--json")
 	assertTaskError(t, dependentAssignment, 2, "task_not_ready", true)
 	if pending := successfulTaskCommand(t, repo, "inspect", dependent.Result.ID); pending.Result.Status != "planned" || pending.Result.BatchID != "" {
 		t.Fatalf("dependent work entered its prerequisite batch: %+v", pending.Result)
@@ -140,17 +140,17 @@ func TestBatchFreezePersistsOrderedAttributableMembership(t *testing.T) {
 	const freezeProcesses = 4
 	startFreeze := make(chan struct{})
 	freezeResults := make(chan concurrentCommandResult, freezeProcesses)
-	var freezeWorkers sync.WaitGroup
+	var freezeAgents sync.WaitGroup
 	for range freezeProcesses {
-		freezeWorkers.Add(1)
+		freezeAgents.Add(1)
 		go func() {
-			defer freezeWorkers.Done()
+			defer freezeAgents.Done()
 			<-startFreeze
 			freezeResults <- runBandmasterConcurrently(repo, "batch", "freeze", "--json")
 		}()
 	}
 	close(startFreeze)
-	freezeWorkers.Wait()
+	freezeAgents.Wait()
 	close(freezeResults)
 	var frozen batchResponse
 	for result := range freezeResults {
@@ -171,11 +171,11 @@ func TestBatchFreezePersistsOrderedAttributableMembership(t *testing.T) {
 	if frozen.Result.BaseBranch != "main" || frozen.Result.BaseCommit != started.Result.StartingCommit || frozen.Result.CreationOrder != 1 {
 		t.Fatalf("frozen batch lost its base: %+v", frozen.Result)
 	}
-	if len(frozen.Result.Members) != 2 || frozen.Result.Members[0].TaskID != left.Result.ID || frozen.Result.Members[0].MembershipOrder != 1 || frozen.Result.Members[1].TaskID != right.Result.ID || frozen.Result.Members[1].MembershipOrder != 2 {
-		t.Fatalf("membership was not frozen in claim order: %+v", frozen.Result.Members)
+	if len(frozen.Result.Tasks) != 2 || frozen.Result.Tasks[0].TaskID != left.Result.ID || frozen.Result.Tasks[0].TaskOrder != 1 || frozen.Result.Tasks[1].TaskID != right.Result.ID || frozen.Result.Tasks[1].TaskOrder != 2 {
+		t.Fatalf("Batch Tasks were not frozen in claim order: %+v", frozen.Result.Tasks)
 	}
-	if frozen.Result.Members[0].Outcome != "pending_changes" || frozen.Result.Members[1].Outcome != "pending_no_op" {
-		t.Fatalf("submission outcomes were not retained: %+v", frozen.Result.Members)
+	if frozen.Result.Tasks[0].Outcome != "pending_changes" || frozen.Result.Tasks[1].Outcome != "pending_no_op" {
+		t.Fatalf("submission outcomes were not retained: %+v", frozen.Result.Tasks)
 	}
 	if len(frozen.Result.Manifest) != 2 || frozen.Result.Manifest[0].TaskID != left.Result.ID || frozen.Result.Manifest[0].Path != "left.txt" || frozen.Result.Manifest[0].Baseline.ContentHash == frozen.Result.Manifest[0].Submitted.ContentHash || frozen.Result.Manifest[1].TaskID != right.Result.ID || frozen.Result.Manifest[1].Path != "right.txt" || frozen.Result.Manifest[1].Baseline.ContentHash != frozen.Result.Manifest[1].Submitted.ContentHash {
 		t.Fatalf("frozen path manifest is not attributable and complete: %+v", frozen.Result.Manifest)
@@ -185,7 +185,7 @@ func TestBatchFreezePersistsOrderedAttributableMembership(t *testing.T) {
 	}
 
 	inspected := successfulBatchCommand(t, repo, "inspect", frozen.Result.ID)
-	if inspected.Result.ID != frozen.Result.ID || inspected.Result.FrozenAt != frozen.Result.FrozenAt || len(inspected.Result.Members) != 2 || len(inspected.Result.Manifest) != 2 {
+	if inspected.Result.ID != frozen.Result.ID || inspected.Result.FrozenAt != frozen.Result.FrozenAt || len(inspected.Result.Tasks) != 2 || len(inspected.Result.Manifest) != 2 {
 		t.Fatalf("fresh invocation did not observe the frozen batch: %+v", inspected.Result)
 	}
 	retried := successfulBatchCommand(t, repo, "freeze")
@@ -196,7 +196,7 @@ func TestBatchFreezePersistsOrderedAttributableMembership(t *testing.T) {
 		t.Fatalf("batch freeze did not enter controlled finalization: %+v", session.Result)
 	}
 	if blockedTask := successfulTaskCommand(t, repo, "inspect", contender.Result.ID); blockedTask.Result.BatchID != "" {
-		t.Fatalf("late blocked task altered frozen membership: %+v", blockedTask.Result)
+		t.Fatalf("late blocked task altered the ordered Batch Tasks: %+v", blockedTask.Result)
 	}
 	assertSessionError(t, repo, "finish", "batch_finalization_in_progress")
 	writeFile(t, filepath.Join(repo, "left.txt"), "changed after the frozen barrier\n")
@@ -232,7 +232,7 @@ func TestBatchBarrierQuarantinesIndexDrift(t *testing.T) {
 			runGit(t, repo, "-c", "user.name=Bandmaster Tests", "-c", "user.email=bandmaster@example.invalid", "commit", "-m", "Add barrier drift fixture")
 			successfulSessionCommand(t, repo, "start")
 			task := successfulTaskCommand(t, repo, "create", "--title", "Barrier drift", "--intent", "Freeze exact state", "--expected-outcome", "Unsafe drift is quarantined")
-			assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-barrier-drift")
+			assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "agent-barrier-drift")
 			successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assigned.Result.AssignmentToken, "--path", "owned.txt")
 			writeFile(t, filepath.Join(repo, "owned.txt"), "submitted\n")
 			submitBatchTask(t, repo, task.Result.ID, assigned.Result.AssignmentToken)
@@ -270,7 +270,7 @@ func successfulBatchCommand(t *testing.T, repo, action string, args ...string) b
 		t.Fatalf("batch %s exit code = %d, stdout = %s, stderr = %s", action, result.exitCode, result.stdout, result.stderr)
 	}
 	response := decodeBatchResponse(t, result.stdout)
-	if !response.Success || response.SchemaVersion != "1" || response.Command != "batch "+action {
+	if !response.Success || response.SchemaVersion != "2" || response.Command != "batch "+action {
 		t.Fatalf("unexpected batch %s response: %+v", action, response)
 	}
 	return response
@@ -282,7 +282,7 @@ func assertBatchError(t *testing.T, result commandResult, wantExit int, wantCode
 		t.Fatalf("batch command exit code = %d, want %d; stdout = %s; stderr = %s", result.exitCode, wantExit, result.stdout, result.stderr)
 	}
 	response := decodeBatchResponse(t, result.stdout)
-	if response.Success || response.SchemaVersion != "1" || response.Error.Code != wantCode || response.Error.Retryable != wantRetryable {
+	if response.Success || response.SchemaVersion != "2" || response.Error.Code != wantCode || response.Error.Retryable != wantRetryable {
 		t.Fatalf("batch command error = %+v, want code %q retryable %t", response, wantCode, wantRetryable)
 	}
 	return response

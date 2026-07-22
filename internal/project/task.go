@@ -17,12 +17,12 @@ type Task struct {
 	ExpectedOutcome   string              `json:"expected_outcome"`
 	Prerequisites     []string            `json:"prerequisites"`
 	Status            string              `json:"status"`
-	WorkerIdentity    string              `json:"worker_identity,omitempty"`
+	AgentIdentity     string              `json:"agent_identity,omitempty"`
 	AssignmentToken   string              `json:"assignment_token,omitempty"`
 	CoreFrozen        bool                `json:"core_frozen"`
 	BatchID           string              `json:"batch_id,omitempty"`
 	CommitSHA         string              `json:"commit_sha,omitempty"`
-	Lease             *WorkerLease        `json:"lease,omitempty"`
+	Lease             *AgentLease         `json:"lease,omitempty"`
 	Claims            []Claim             `json:"claims"`
 	OwnershipEvidence []OwnershipEvidence `json:"ownership_evidence"`
 	FocusedValidation []FocusedValidation `json:"focused_validation"`
@@ -37,7 +37,7 @@ type TaskAuditEvent struct {
 	Event            string           `json:"event"`
 	FromStatus       string           `json:"from_status,omitempty"`
 	ToStatus         string           `json:"to_status"`
-	WorkerIdentity   string           `json:"worker_identity,omitempty"`
+	AgentIdentity    string           `json:"agent_identity,omitempty"`
 	TerminationProof string           `json:"termination_proof,omitempty"`
 	RecoveryMethod   string           `json:"recovery_method,omitempty"`
 	UserConfirmation string           `json:"user_confirmation,omitempty"`

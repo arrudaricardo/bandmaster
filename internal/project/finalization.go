@@ -57,7 +57,7 @@ func (p *Project) CommitBatch() (Batch, *Error) {
 		return Batch{}, integrityError(session.ID, observations[0])
 	}
 
-	members, projectError := finalizationMembers(db, session.ID, batchID)
+	tasks, projectError := finalizationTasks(db, session.ID, batchID)
 	if projectError != nil {
 		return Batch{}, projectError
 	}
@@ -69,7 +69,7 @@ func (p *Project) CommitBatch() (Batch, *Error) {
 	if err != nil {
 		return Batch{}, sessionInternal(session.ID, "read pre-finalization commit", err)
 	}
-	if projectError := recordFinalizationJournal(db, session.ID, batchID, branch, preBatchCommit, members); projectError != nil {
+	if projectError := recordFinalizationJournal(db, session.ID, batchID, branch, preBatchCommit, tasks); projectError != nil {
 		return Batch{}, projectError
 	}
 	crashFinalizationForTest("prepared")
@@ -80,20 +80,20 @@ func (p *Project) CommitBatch() (Batch, *Error) {
 		return Batch{}, p.rollbackFinalization(db, session, batchID, branch, preBatchCommit, projectError)
 	}
 	crashFinalizationForTest("committing")
-	for _, member := range members {
-		if !member.changed {
+	for _, task := range tasks {
+		if !task.changed {
 			continue
 		}
-		sha, hookChanged, projectError := p.commitTask(session, batchID, member)
+		sha, hookChanged, projectError := p.commitTask(session, batchID, task)
 		if projectError != nil {
 			return Batch{}, p.rollbackFinalization(db, session, batchID, branch, preBatchCommit, projectError)
 		}
 		if hookChanged {
-			if projectError := recordHookChange(db, session.ID, member.id); projectError != nil {
+			if projectError := recordHookChange(db, session.ID, task.id); projectError != nil {
 				return Batch{}, p.rollbackFinalization(db, session, batchID, branch, preBatchCommit, projectError)
 			}
 		}
-		if projectError := recordTaskCommit(db, session.ID, batchID, member.id, sha); projectError != nil {
+		if projectError := recordTaskCommit(db, session.ID, batchID, task.id, sha); projectError != nil {
 			return Batch{}, p.rollbackFinalization(db, session, batchID, branch, preBatchCommit, projectError)
 		}
 	}
@@ -203,10 +203,10 @@ func (p *Project) finalizationHookRunning() (bool, error) {
 	return false, nil
 }
 
-func recordFinalizationJournal(db *sql.DB, sessionID, batchID, branch, preBatchCommit string, members []finalizationMember) *Error {
-	plan := make([]string, 0, len(members))
-	for _, member := range members {
-		plan = append(plan, member.id)
+func recordFinalizationJournal(db *sql.DB, sessionID, batchID, branch, preBatchCommit string, tasks []finalizationTask) *Error {
+	plan := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		plan = append(plan, task.id)
 	}
 	encodedPlan, err := json.Marshal(plan)
 	if err != nil {
@@ -367,7 +367,7 @@ func (p *Project) quarantineFinalization(db *sql.DB, session Session, batchID, o
 	return integrityError(session.ID, observation)
 }
 
-type finalizationMember struct {
+type finalizationTask struct {
 	id, title, intent string
 	order             int64
 	changed           bool
@@ -380,39 +380,39 @@ type finalizationPath struct {
 	baseline, submitted capturedSnapshot
 }
 
-func finalizationMembers(db *sql.DB, sessionID, batchID string) ([]finalizationMember, *Error) {
+func finalizationTasks(db *sql.DB, sessionID, batchID string) ([]finalizationTask, *Error) {
 	rows, err := db.Query(`SELECT task.id, task.title, task.intent, task.creation_order, submission.no_changes
-		FROM batch_members member JOIN tasks task ON task.id = member.task_id
+		FROM batch_tasks batch_task JOIN tasks task ON task.id = batch_task.task_id
 		JOIN task_submissions submission ON submission.task_id = task.id
-		WHERE member.batch_id = ? ORDER BY task.creation_order`, batchID)
+		WHERE batch_task.batch_id = ? ORDER BY batch_task.task_order`, batchID)
 	if err != nil {
-		return nil, sessionInternal(sessionID, "read commit members", err)
+		return nil, sessionInternal(sessionID, "read commit tasks", err)
 	}
 	defer rows.Close()
-	var members []finalizationMember
+	var tasks []finalizationTask
 	for rows.Next() {
-		var member finalizationMember
+		var task finalizationTask
 		var noChanges int
-		if err := rows.Scan(&member.id, &member.title, &member.intent, &member.order, &noChanges); err != nil {
-			return nil, sessionInternal(sessionID, "read commit member", err)
+		if err := rows.Scan(&task.id, &task.title, &task.intent, &task.order, &noChanges); err != nil {
+			return nil, sessionInternal(sessionID, "read commit task", err)
 		}
-		member.changed = noChanges == 0
-		members = append(members, member)
+		task.changed = noChanges == 0
+		tasks = append(tasks, task)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, sessionInternal(sessionID, "read commit members", err)
+		return nil, sessionInternal(sessionID, "read commit tasks", err)
 	}
 	if err := rows.Close(); err != nil {
-		return nil, sessionInternal(sessionID, "close commit members", err)
+		return nil, sessionInternal(sessionID, "close commit tasks", err)
 	}
-	for index := range members {
+	for index := range tasks {
 		pathRows, err := db.Query(`
 			SELECT path,
 				baseline_presence, baseline_type, baseline_content_hash, baseline_executable, baseline_content,
 				submitted_presence, submitted_type, submitted_content_hash, submitted_executable, submitted_content
 			FROM frozen_batch_paths
 			WHERE batch_id = ? AND task_id = ?
-			ORDER BY claim_order`, batchID, members[index].id)
+			ORDER BY claim_order`, batchID, tasks[index].id)
 		if err != nil {
 			return nil, sessionInternal(sessionID, "read task frozen manifest", err)
 		}
@@ -434,27 +434,27 @@ func finalizationMembers(db *sql.DB, sessionID, batchID string) ([]finalizationM
 			manifest.submitted.Path = manifest.path
 			manifest.submitted.ContentHash = submittedHash.String
 			manifest.submitted.Executable = submittedExecutable != 0
-			members[index].paths = append(members[index].paths, manifest.path)
-			members[index].manifest = append(members[index].manifest, manifest)
+			tasks[index].paths = append(tasks[index].paths, manifest.path)
+			tasks[index].manifest = append(tasks[index].manifest, manifest)
 		}
 		if err := pathRows.Close(); err != nil {
 			return nil, sessionInternal(sessionID, "close task frozen manifest", err)
 		}
 	}
-	return members, nil
+	return tasks, nil
 }
 
-func (p *Project) commitTask(session Session, batchID string, member finalizationMember) (string, bool, *Error) {
+func (p *Project) commitTask(session Session, batchID string, task finalizationTask) (string, bool, *Error) {
 	parent, err := gitOutput(p.Root, "rev-parse", "HEAD")
 	if err != nil {
 		return "", false, sessionInternal(session.ID, "read commit parent", err)
 	}
-	if len(member.paths) == 0 {
+	if len(task.paths) == 0 {
 		return "", false, invalidSession(session.ID, "task_has_no_claims", "A changed submitted task has no claims.")
 	}
-	before := make([]capturedSnapshot, 0, len(member.manifest))
-	expectedPaths := make([]string, 0, len(member.manifest))
-	for _, manifest := range member.manifest {
+	before := make([]capturedSnapshot, 0, len(task.manifest))
+	expectedPaths := make([]string, 0, len(task.manifest))
+	for _, manifest := range task.manifest {
 		current, projectError := p.capturePath(manifest.path)
 		if projectError != nil {
 			return "", false, projectError
@@ -471,7 +471,7 @@ func (p *Project) commitTask(session Session, batchID string, member finalizatio
 	if len(expectedPaths) == 0 {
 		return "", false, invalidSession(session.ID, "submission_snapshot_mismatch", "A changed submission has no changes in its frozen manifest.")
 	}
-	args := append([]string{"add", "--"}, member.paths...)
+	args := append([]string{"add", "--"}, task.paths...)
 	if _, err := gitOutput(p.Root, args...); err != nil {
 		return "", false, sessionInternal(session.ID, "stage task changes", err)
 	}
@@ -482,7 +482,7 @@ func (p *Project) commitTask(session Session, batchID string, member finalizatio
 	if !samePaths(splitNullPaths(staged), expectedPaths) {
 		return "", false, invalidSession(session.ID, "commit_path_mismatch", "Staging included paths outside the task's claims or missed a claimed path.")
 	}
-	for _, manifest := range member.manifest {
+	for _, manifest := range task.manifest {
 		stagedSnapshot, projectError := p.captureIndexPath(manifest.path)
 		if projectError != nil {
 			return "", false, projectError
@@ -491,9 +491,9 @@ func (p *Project) commitTask(session Session, batchID string, member finalizatio
 			return "", false, invalidSession(session.ID, "commit_snapshot_mismatch", fmt.Sprintf("Staged path %s does not match its frozen submitted snapshot.", manifest.path))
 		}
 	}
-	message := deterministicCommitMessage(member)
+	message := deterministicCommitMessage(task)
 	if _, err := gitOutput(p.Root, "commit", "-m", message); err != nil {
-		return "", false, invalidSession(session.ID, "git_commit_failed", fmt.Sprintf("Commit for task %s failed: %v", member.id, err))
+		return "", false, invalidSession(session.ID, "git_commit_failed", fmt.Sprintf("Commit for task %s failed: %v", task.id, err))
 	}
 	sha, err := gitOutput(p.Root, "rev-parse", "HEAD")
 	if err != nil {
@@ -506,13 +506,13 @@ func (p *Project) commitTask(session Session, batchID string, member finalizatio
 	if branch, err := gitOutput(p.Root, "branch", "--show-current"); err != nil || branch != session.StartingBranch {
 		return "", false, invalidSession(session.ID, "commit_branch_mismatch", "Task commit changed the finalization branch.")
 	}
-	if message, err := gitOutput(p.Root, "log", "-1", "--format=%B", "HEAD"); err != nil || message != deterministicCommitMessage(member) {
+	if message, err := gitOutput(p.Root, "log", "-1", "--format=%B", "HEAD"); err != nil || message != deterministicCommitMessage(task) {
 		return "", false, invalidSession(session.ID, "commit_message_mismatch", "Task commit message differs from the deterministic Bandmaster message.")
 	}
 	if index, err := gitOutput(p.Root, "diff", "--cached", "--name-only"); err != nil || index != "" {
 		return "", false, invalidSession(session.ID, "commit_index_mismatch", "Task commit left staged changes in the index.")
 	}
-	if dirty, err := gitOutput(p.Root, append([]string{"diff", "--name-only", "--"}, member.paths...)...); err != nil || dirty != "" {
+	if dirty, err := gitOutput(p.Root, append([]string{"diff", "--name-only", "--"}, task.paths...)...); err != nil || dirty != "" {
 		return "", false, invalidSession(session.ID, "commit_claim_dirty", "Task commit left claimed changes unstaged or dirty.")
 	}
 	committed, err := gitBytes(p.Root, "diff-tree", "--no-commit-id", "--name-only", "--no-renames", "-r", "-z", "HEAD")
@@ -522,7 +522,7 @@ func (p *Project) commitTask(session Session, batchID string, member finalizatio
 	if !samePaths(splitNullPaths(committed), expectedPaths) {
 		return "", false, invalidSession(session.ID, "commit_path_mismatch", "Task commit does not contain exactly its claimed paths.")
 	}
-	after, projectError := p.captureFinalizationPaths(member.paths)
+	after, projectError := p.captureFinalizationPaths(task.paths)
 	if projectError != nil {
 		return "", false, projectError
 	}
@@ -621,8 +621,8 @@ func recordHookChange(db *sql.DB, sessionID, taskID string) *Error {
 	return nil
 }
 
-func deterministicCommitMessage(member finalizationMember) string {
-	return fmt.Sprintf("Bandmaster task %s: %s\n\nIntent: %s\nBandmaster-Task-ID: %s\n", member.id, member.title, member.intent, member.id)
+func deterministicCommitMessage(task finalizationTask) string {
+	return fmt.Sprintf("Bandmaster task %s: %s\n\nIntent: %s\nBandmaster-Task-ID: %s\n", task.id, task.title, task.intent, task.id)
 }
 
 func samePaths(actual, expected []string) bool {
@@ -751,10 +751,10 @@ func (p *Project) completeFinalization(db *sql.DB, sessionID, batchID string) *E
 	if _, err := tx.Exec(`UPDATE batches SET status = 'committed', updated_at = ? WHERE id = ? AND status = 'final_validating'`, now, batchID); err != nil {
 		return sessionInternal(sessionID, "complete batch", err)
 	}
-	if _, err := tx.Exec(`UPDATE tasks SET status = CASE WHEN (SELECT no_changes FROM task_submissions WHERE task_id = tasks.id) = 1 THEN 'no_op' ELSE 'committed' END, worker_identity = NULL, assignment_token = NULL, updated_at = ? WHERE id IN (SELECT task_id FROM batch_members WHERE batch_id = ?) AND status = 'submitted'`, now, batchID); err != nil {
+	if _, err := tx.Exec(`UPDATE tasks SET status = CASE WHEN (SELECT no_changes FROM task_submissions WHERE task_id = tasks.id) = 1 THEN 'no_op' ELSE 'committed' END, agent_identity = NULL, assignment_token = NULL, updated_at = ? WHERE id IN (SELECT task_id FROM batch_tasks WHERE batch_id = ?) AND status = 'submitted'`, now, batchID); err != nil {
 		return sessionInternal(sessionID, "complete tasks", err)
 	}
-	if _, err := tx.Exec(`DELETE FROM task_diff_reviews WHERE task_id IN (SELECT task_id FROM batch_members WHERE batch_id = ?)`, batchID); err != nil {
+	if _, err := tx.Exec(`DELETE FROM task_diff_reviews WHERE task_id IN (SELECT task_id FROM batch_tasks WHERE batch_id = ?)`, batchID); err != nil {
 		return sessionInternal(sessionID, "clear committed diff reviews", err)
 	}
 	if _, err := tx.Exec(`DELETE FROM claims WHERE batch_id = ?`, batchID); err != nil {
@@ -779,7 +779,7 @@ func (p *Project) completeFinalization(db *sql.DB, sessionID, batchID string) *E
 }
 
 func advanceDependentTasks(tx *sql.Tx, sessionID, batchID, now string) *Error {
-	rows, err := tx.Query(`SELECT DISTINCT dependent.id FROM tasks dependent JOIN task_dependencies dependency ON dependency.task_id = dependent.id JOIN batch_members prerequisite_member ON prerequisite_member.task_id = dependency.prerequisite_id WHERE dependent.session_id = ? AND dependent.status = 'planned' AND prerequisite_member.batch_id = ? ORDER BY dependent.creation_order`, sessionID, batchID)
+	rows, err := tx.Query(`SELECT DISTINCT dependent.id FROM tasks dependent JOIN task_dependencies dependency ON dependency.task_id = dependent.id JOIN batch_tasks prerequisite_task ON prerequisite_task.task_id = dependency.prerequisite_id WHERE dependent.session_id = ? AND dependent.status = 'planned' AND prerequisite_task.batch_id = ? ORDER BY dependent.creation_order`, sessionID, batchID)
 	if err != nil {
 		return sessionInternal(sessionID, "find dependent tasks", err)
 	}

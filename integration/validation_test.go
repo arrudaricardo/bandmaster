@@ -22,7 +22,7 @@ func TestOfficialValidationRunsFocusedThenApprovedRepositoryCommands(t *testing.
 		"name":        "focused-check",
 		"script":      `printf 'focused:%s:%s\n' "$FOCUSED_VALUE" "$PWD"`,
 		"timeout":     "2s",
-		"environment": map[string]string{"FOCUSED_VALUE": "worker"},
+		"environment": map[string]string{"FOCUSED_VALUE": "agent"},
 	})
 	taskID, batchID, startingCommit := frozenValidationBatch(t, repo, focused)
 
@@ -42,10 +42,10 @@ func TestOfficialValidationRunsFocusedThenApprovedRepositoryCommands(t *testing.
 	if focusedRun.Source != "focused" || focusedRun.TaskID != taskID || focusedRun.Name != "focused-check" || focusedRun.CommandOrder != 1 || focusedRun.WorkingDirectory != "." || focusedRun.Status != "passed" || focusedRun.ExitCode == nil || *focusedRun.ExitCode != 0 {
 		t.Fatalf("unexpected focused validation record: %+v", focusedRun)
 	}
-	if focusedRun.EnvironmentOverrides["FOCUSED_VALUE"] != "worker" || focusedRun.ResolvedEnvironment["FOCUSED_VALUE"] != "worker" || focusedRun.ResolvedEnvironment["GIT_CONFIG_GLOBAL"] != "" {
+	if focusedRun.EnvironmentOverrides["FOCUSED_VALUE"] != "agent" || focusedRun.ResolvedEnvironment["FOCUSED_VALUE"] != "agent" || focusedRun.ResolvedEnvironment["GIT_CONFIG_GLOBAL"] != "" {
 		t.Fatalf("focused validation environment was not minimal plus overrides: %+v", focusedRun.ResolvedEnvironment)
 	}
-	if len(focusedRun.ResolvedArgv) != 3 || focusedRun.ResolvedArgv[0] != "/bin/sh" || focusedRun.ResolvedWorkingDirectory != resolvedRepo || !strings.Contains(focusedRun.Stdout, "focused:worker:"+resolvedRepo) || focusedRun.StdoutTruncated || focusedRun.StderrTruncated {
+	if len(focusedRun.ResolvedArgv) != 3 || focusedRun.ResolvedArgv[0] != "/bin/sh" || focusedRun.ResolvedWorkingDirectory != resolvedRepo || !strings.Contains(focusedRun.Stdout, "focused:agent:"+resolvedRepo) || focusedRun.StdoutTruncated || focusedRun.StderrTruncated {
 		t.Fatalf("focused command details were not resolved and captured: %+v", focusedRun)
 	}
 	repositoryRun := attempt.Commands[1]
@@ -177,7 +177,7 @@ func repositoryWithValidation(t *testing.T, validationYAML string) string {
 	repo := newGitRepository(t)
 	writeFile(t, filepath.Join(repo, "README.md"), "# Validation fixture\n")
 	writeFile(t, filepath.Join(repo, "owned.txt"), "baseline\n")
-	writeFile(t, filepath.Join(repo, ".bandmaster.yaml"), "version: 1\nworker_lease_duration: 5m\nvalidation:"+validationYAML)
+	writeFile(t, filepath.Join(repo, ".bandmaster.yaml"), "version: 2\nagent_lease_duration: 5m\nvalidation:"+validationYAML)
 	initialized := runBandmaster(t, repo, "init", "--json")
 	if initialized.exitCode != 0 {
 		t.Fatalf("init validation repository: %+v", initialized)
@@ -195,7 +195,7 @@ func frozenValidationBatch(t *testing.T, repo, focusedValidation string) (string
 	t.Helper()
 	started := successfulSessionCommand(t, repo, "start")
 	task := successfulTaskCommand(t, repo, "create", "--title", "Validate work", "--intent", "Exercise official validation", "--expected-outcome", "Validation is recorded")
-	assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-validation")
+	assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "agent-validation")
 	claimArgs := []string{"claim", task.Result.ID, "--token", assigned.Result.AssignmentToken, "--path", "owned.txt"}
 	if focusedValidation != "" {
 		claimArgs = append(claimArgs, "--validation", focusedValidation)

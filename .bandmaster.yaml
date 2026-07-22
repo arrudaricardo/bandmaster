@@ -1,5 +1,5 @@
-version: 1
-worker_lease_duration: 5m
+version: 2
+agent_lease_duration: 5m
 validation:
   commands:
     - name: go-test

@@ -20,7 +20,7 @@ type taskResponse struct {
 		ExpectedOutcome string   `json:"expected_outcome"`
 		Prerequisites   []string `json:"prerequisites"`
 		Status          string   `json:"status"`
-		WorkerIdentity  string   `json:"worker_identity"`
+		AgentIdentity   string   `json:"agent_identity"`
 		AssignmentToken string   `json:"assignment_token"`
 		CoreFrozen      bool     `json:"core_frozen"`
 		BatchID         string   `json:"batch_id"`
@@ -81,7 +81,7 @@ type taskResponse struct {
 			Event            string `json:"event"`
 			FromStatus       string `json:"from_status"`
 			ToStatus         string `json:"to_status"`
-			WorkerIdentity   string `json:"worker_identity"`
+			AgentIdentity    string `json:"agent_identity"`
 			TerminationProof string `json:"termination_proof"`
 			RecoveryMethod   string `json:"recovery_method"`
 			UserConfirmation string `json:"user_confirmation"`
@@ -120,22 +120,22 @@ type taskResponse struct {
 	} `json:"error"`
 }
 
-func TestAssignmentOnlySucceedsForReadyTasksAndFreezesTheWorkerAttempt(t *testing.T) {
+func TestAssignmentOnlySucceedsForReadyTasksAndFreezesTheAgentAttempt(t *testing.T) {
 	repo := approvedCleanRepository(t)
 	session := successfulSessionCommand(t, repo, "start")
 	ready := successfulTaskCommand(t, repo, "create",
 		"--title", "Independent work",
 		"--intent", "Run immediately",
-		"--expected-outcome", "Worker can begin",
+		"--expected-outcome", "Agent can begin",
 	)
 	planned := successfulTaskCommand(t, repo, "create",
 		"--title", "Dependent work",
 		"--intent", "Wait for the prerequisite",
-		"--expected-outcome", "Worker sees prior accepted work",
+		"--expected-outcome", "Agent sees prior accepted work",
 		"--prerequisite", ready.Result.ID,
 	)
 
-	blocked := runBandmaster(t, repo, "task", "assign", planned.Result.ID, "--worker", "worker-dependent", "--json")
+	blocked := runBandmaster(t, repo, "task", "assign", planned.Result.ID, "--agent", "agent-dependent", "--json")
 	if blocked.exitCode != 2 {
 		t.Fatalf("dependent assignment exit code = %d, want 2; stdout = %s; stderr = %s", blocked.exitCode, blocked.stdout, blocked.stderr)
 	}
@@ -144,20 +144,20 @@ func TestAssignmentOnlySucceedsForReadyTasksAndFreezesTheWorkerAttempt(t *testin
 		t.Fatalf("unexpected blocked assignment: %+v", blockedResponse)
 	}
 
-	assigned := successfulTaskCommand(t, repo, "assign", ready.Result.ID, "--worker", "worker-parser")
-	if assigned.SessionID != session.SessionID || assigned.Result.Status != "assigned" || assigned.Result.WorkerIdentity != "worker-parser" || assigned.Result.AssignmentToken == "" {
+	assigned := successfulTaskCommand(t, repo, "assign", ready.Result.ID, "--agent", "agent-parser")
+	if assigned.SessionID != session.SessionID || assigned.Result.Status != "assigned" || assigned.Result.AgentIdentity != "agent-parser" || assigned.Result.AssignmentToken == "" {
 		t.Fatalf("unexpected assignment: %+v", assigned)
 	}
-	retried := successfulTaskCommand(t, repo, "assign", ready.Result.ID, "--worker", "worker-parser")
+	retried := successfulTaskCommand(t, repo, "assign", ready.Result.ID, "--agent", "agent-parser")
 	if retried.Result.AssignmentToken != assigned.Result.AssignmentToken {
 		t.Fatalf("idempotent assignment replaced token: first=%q second=%q", assigned.Result.AssignmentToken, retried.Result.AssignmentToken)
 	}
 
 	inspected := successfulTaskCommand(t, repo, "inspect", ready.Result.ID)
-	if inspected.Result.Title != "Independent work" || inspected.Result.Intent != "Run immediately" || inspected.Result.ExpectedOutcome != "Worker can begin" {
+	if inspected.Result.Title != "Independent work" || inspected.Result.Intent != "Run immediately" || inspected.Result.ExpectedOutcome != "Agent can begin" {
 		t.Fatalf("assignment changed frozen planning fields: %+v", inspected.Result)
 	}
-	if len(inspected.Result.AuditHistory) != 2 || inspected.Result.AuditHistory[1].Event != "task_assigned" || inspected.Result.AuditHistory[1].FromStatus != "ready" || inspected.Result.AuditHistory[1].ToStatus != "assigned" || inspected.Result.AuditHistory[1].WorkerIdentity != "worker-parser" {
+	if len(inspected.Result.AuditHistory) != 2 || inspected.Result.AuditHistory[1].Event != "task_assigned" || inspected.Result.AuditHistory[1].FromStatus != "ready" || inspected.Result.AuditHistory[1].ToStatus != "assigned" || inspected.Result.AuditHistory[1].AgentIdentity != "agent-parser" {
 		t.Fatalf("unexpected assignment audit history: %+v", inspected.Result.AuditHistory)
 	}
 }
@@ -172,9 +172,9 @@ func TestAssignmentQuarantinesActiveSessionConfigurationDrift(t *testing.T) {
 	)
 	configPath := filepath.Join(repo, ".bandmaster.yaml")
 	config := readFile(t, configPath)
-	writeFile(t, configPath, strings.Replace(config, "worker_lease_duration: 5m", "worker_lease_duration: 10m", 1))
+	writeFile(t, configPath, strings.Replace(config, "agent_lease_duration: 5m", "agent_lease_duration: 10m", 1))
 
-	unapproved := runBandmaster(t, repo, "task", "assign", task.Result.ID, "--worker", "worker-config", "--json")
+	unapproved := runBandmaster(t, repo, "task", "assign", task.Result.ID, "--agent", "agent-config", "--json")
 	assertTaskError(t, unapproved, 4, "unclaimed_change", false)
 	if inspected := successfulTaskCommand(t, repo, "inspect", task.Result.ID); inspected.Result.Status != "ready" || inspected.Result.Lease != nil {
 		t.Fatalf("unapproved lease configuration changed assignment state: %+v", inspected.Result)
@@ -198,7 +198,7 @@ func TestReplanningAssignedWorkRequiresTerminationAndRevokesTheToken(t *testing.
 		"--expected-outcome", "Dependency remains valid",
 		"--prerequisite", first.Result.ID,
 	)
-	assigned := successfulTaskCommand(t, repo, "assign", first.Result.ID, "--worker", "worker-original")
+	assigned := successfulTaskCommand(t, repo, "assign", first.Result.ID, "--agent", "agent-original")
 
 	missingProof := runBandmaster(t, repo,
 		"task", "replan", first.Result.ID,
@@ -207,45 +207,45 @@ func TestReplanningAssignedWorkRequiresTerminationAndRevokesTheToken(t *testing.
 		"--expected-outcome", "Revised result",
 		"--json",
 	)
-	assertTaskError(t, missingProof, 3, "worker_termination_required", false)
+	assertTaskError(t, missingProof, 3, "agent_termination_required", false)
 	wrongProof := runBandmaster(t, repo,
 		"task", "replan", first.Result.ID,
 		"--title", "Revised plan",
 		"--intent", "Revised behavior",
 		"--expected-outcome", "Revised result",
-		"--terminated-worker", "worker-other",
-		"--termination-proof", "codex-handle-worker-other-stopped",
+		"--terminated-agent", "agent-other",
+		"--termination-proof", "codex-handle-agent-other-stopped",
 		"--json",
 	)
-	assertTaskError(t, wrongProof, 3, "worker_termination_mismatch", false)
+	assertTaskError(t, wrongProof, 3, "agent_termination_mismatch", false)
 	missingEvidence := runBandmaster(t, repo,
 		"task", "replan", first.Result.ID,
 		"--title", "Revised plan",
 		"--intent", "Revised behavior",
 		"--expected-outcome", "Revised result",
-		"--terminated-worker", "worker-original",
+		"--terminated-agent", "agent-original",
 		"--json",
 	)
-	assertTaskError(t, missingEvidence, 3, "worker_termination_proof_required", false)
+	assertTaskError(t, missingEvidence, 3, "agent_termination_proof_required", false)
 
 	replanned := successfulTaskCommand(t, repo, "replan", first.Result.ID,
 		"--title", "Revised plan",
 		"--intent", "Revised behavior",
 		"--expected-outcome", "Revised result",
-		"--terminated-worker", "worker-original",
-		"--termination-proof", "codex-handle-worker-original-stopped",
+		"--terminated-agent", "agent-original",
+		"--termination-proof", "codex-handle-agent-original-stopped",
 	)
-	if replanned.Result.Status != "ready" || replanned.Result.WorkerIdentity != "" || replanned.Result.AssignmentToken != "" {
-		t.Fatalf("replanned assignment retained worker authority: %+v", replanned.Result)
+	if replanned.Result.Status != "ready" || replanned.Result.AgentIdentity != "" || replanned.Result.AssignmentToken != "" {
+		t.Fatalf("replanned assignment retained agent authority: %+v", replanned.Result)
 	}
 	if replanned.Result.Title != "Revised plan" || replanned.Result.Intent != "Revised behavior" || replanned.Result.ExpectedOutcome != "Revised result" {
 		t.Fatalf("replanned fields were not persisted: %+v", replanned.Result)
 	}
-	if len(replanned.Result.AuditHistory) != 3 || replanned.Result.AuditHistory[2].Event != "task_replanned" || replanned.Result.AuditHistory[2].FromStatus != "assigned" || replanned.Result.AuditHistory[2].ToStatus != "ready" || replanned.Result.AuditHistory[2].WorkerIdentity != "worker-original" || replanned.Result.AuditHistory[2].TerminationProof != "codex-handle-worker-original-stopped" {
+	if len(replanned.Result.AuditHistory) != 3 || replanned.Result.AuditHistory[2].Event != "task_replanned" || replanned.Result.AuditHistory[2].FromStatus != "assigned" || replanned.Result.AuditHistory[2].ToStatus != "ready" || replanned.Result.AuditHistory[2].AgentIdentity != "agent-original" || replanned.Result.AuditHistory[2].TerminationProof != "codex-handle-agent-original-stopped" {
 		t.Fatalf("unexpected replan audit history: %+v", replanned.Result.AuditHistory)
 	}
 
-	reassigned := successfulTaskCommand(t, repo, "assign", first.Result.ID, "--worker", "worker-replacement")
+	reassigned := successfulTaskCommand(t, repo, "assign", first.Result.ID, "--agent", "agent-replacement")
 	if reassigned.Result.AssignmentToken == "" || reassigned.Result.AssignmentToken == assigned.Result.AssignmentToken {
 		t.Fatalf("replacement assignment did not receive a new token: old=%q new=%q", assigned.Result.AssignmentToken, reassigned.Result.AssignmentToken)
 	}
@@ -256,8 +256,8 @@ func TestReplanningAssignedWorkRequiresTerminationAndRevokesTheToken(t *testing.
 		"--intent", "Invalid dependency",
 		"--expected-outcome", "Cycle is rejected",
 		"--prerequisite", dependent.Result.ID,
-		"--terminated-worker", "worker-replacement",
-		"--termination-proof", "codex-handle-worker-replacement-stopped",
+		"--terminated-agent", "agent-replacement",
+		"--termination-proof", "codex-handle-agent-replacement-stopped",
 		"--json",
 	)
 	assertTaskError(t, cycle, 3, "task_dependency_cycle", false)
@@ -281,9 +281,9 @@ func TestCancelingAssignedClaimlessWorkRequiresTerminationAndResolvedDependents(
 		"--expected-outcome", "Combined behavior works",
 		"--prerequisite", prerequisite.Result.ID,
 	)
-	assigned := successfulTaskCommand(t, repo, "assign", prerequisite.Result.ID, "--worker", "worker-obsolete")
+	assigned := successfulTaskCommand(t, repo, "assign", prerequisite.Result.ID, "--agent", "agent-obsolete")
 
-	withDependent := runBandmaster(t, repo, "task", "cancel", prerequisite.Result.ID, "--terminated-worker", "worker-obsolete", "--termination-proof", "codex-handle-worker-obsolete-stopped", "--json")
+	withDependent := runBandmaster(t, repo, "task", "cancel", prerequisite.Result.ID, "--terminated-agent", "agent-obsolete", "--termination-proof", "codex-handle-agent-obsolete-stopped", "--json")
 	assertTaskError(t, withDependent, 3, "task_has_dependents", false)
 	stillAssigned := successfulTaskCommand(t, repo, "inspect", prerequisite.Result.ID)
 	if stillAssigned.Result.AssignmentToken != assigned.Result.AssignmentToken || stillAssigned.Result.Status != "assigned" {
@@ -296,17 +296,17 @@ func TestCancelingAssignedClaimlessWorkRequiresTerminationAndResolvedDependents(
 		"--expected-outcome", "Independent behavior works",
 	)
 	missingProof := runBandmaster(t, repo, "task", "cancel", prerequisite.Result.ID, "--json")
-	assertTaskError(t, missingProof, 3, "worker_termination_required", false)
-	wrongProof := runBandmaster(t, repo, "task", "cancel", prerequisite.Result.ID, "--terminated-worker", "worker-other", "--termination-proof", "codex-handle-worker-other-stopped", "--json")
-	assertTaskError(t, wrongProof, 3, "worker_termination_mismatch", false)
-	missingEvidence := runBandmaster(t, repo, "task", "cancel", prerequisite.Result.ID, "--terminated-worker", "worker-obsolete", "--json")
-	assertTaskError(t, missingEvidence, 3, "worker_termination_proof_required", false)
+	assertTaskError(t, missingProof, 3, "agent_termination_required", false)
+	wrongProof := runBandmaster(t, repo, "task", "cancel", prerequisite.Result.ID, "--terminated-agent", "agent-other", "--termination-proof", "codex-handle-agent-other-stopped", "--json")
+	assertTaskError(t, wrongProof, 3, "agent_termination_mismatch", false)
+	missingEvidence := runBandmaster(t, repo, "task", "cancel", prerequisite.Result.ID, "--terminated-agent", "agent-obsolete", "--json")
+	assertTaskError(t, missingEvidence, 3, "agent_termination_proof_required", false)
 
-	canceled := successfulTaskCommand(t, repo, "cancel", prerequisite.Result.ID, "--terminated-worker", "worker-obsolete", "--termination-proof", "codex-handle-worker-obsolete-stopped")
-	if canceled.Result.Status != "canceled" || canceled.Result.WorkerIdentity != "" || canceled.Result.AssignmentToken != "" {
-		t.Fatalf("canceled task retained worker authority: %+v", canceled.Result)
+	canceled := successfulTaskCommand(t, repo, "cancel", prerequisite.Result.ID, "--terminated-agent", "agent-obsolete", "--termination-proof", "codex-handle-agent-obsolete-stopped")
+	if canceled.Result.Status != "canceled" || canceled.Result.AgentIdentity != "" || canceled.Result.AssignmentToken != "" {
+		t.Fatalf("canceled task retained agent authority: %+v", canceled.Result)
 	}
-	if len(canceled.Result.AuditHistory) != 3 || canceled.Result.AuditHistory[2].Event != "task_canceled" || canceled.Result.AuditHistory[2].FromStatus != "assigned" || canceled.Result.AuditHistory[2].ToStatus != "canceled" || canceled.Result.AuditHistory[2].WorkerIdentity != "worker-obsolete" || canceled.Result.AuditHistory[2].TerminationProof != "codex-handle-worker-obsolete-stopped" {
+	if len(canceled.Result.AuditHistory) != 3 || canceled.Result.AuditHistory[2].Event != "task_canceled" || canceled.Result.AuditHistory[2].FromStatus != "assigned" || canceled.Result.AuditHistory[2].ToStatus != "canceled" || canceled.Result.AuditHistory[2].AgentIdentity != "agent-obsolete" || canceled.Result.AuditHistory[2].TerminationProof != "codex-handle-agent-obsolete-stopped" {
 		t.Fatalf("unexpected cancellation audit history: %+v", canceled.Result.AuditHistory)
 	}
 	retried := successfulTaskCommand(t, repo, "cancel", prerequisite.Result.ID)
@@ -389,7 +389,7 @@ func TestTasksPersistPlanningIdentityDependenciesAndReadiness(t *testing.T) {
 	if err := json.Unmarshal([]byte(listed.stdout), &response); err != nil {
 		t.Fatalf("decode task list: %v\n%s", err, listed.stdout)
 	}
-	if !response.Success || response.SchemaVersion != "1" || response.Command != "task list" || response.SessionID != session.SessionID {
+	if !response.Success || response.SchemaVersion != "2" || response.Command != "task list" || response.SessionID != session.SessionID {
 		t.Fatalf("unexpected task list envelope: %+v", response)
 	}
 	if len(response.Result.Tasks) != 2 {
@@ -412,7 +412,7 @@ func successfulTaskCommand(t *testing.T, repo, action string, args ...string) ta
 		t.Fatalf("task %s exit code = %d, stdout = %s, stderr = %s", action, result.exitCode, result.stdout, result.stderr)
 	}
 	response := decodeTaskResponse(t, result.stdout)
-	if !response.Success || response.SchemaVersion != "1" || response.Command != "task "+action {
+	if !response.Success || response.SchemaVersion != "2" || response.Command != "task "+action {
 		t.Fatalf("unexpected task %s response: %+v", action, response)
 	}
 	return response
@@ -433,7 +433,7 @@ func assertTaskError(t *testing.T, result commandResult, wantExit int, wantCode 
 		t.Fatalf("task command exit code = %d, want %d; stdout = %s; stderr = %s", result.exitCode, wantExit, result.stdout, result.stderr)
 	}
 	response := decodeTaskResponse(t, result.stdout)
-	if response.Success || response.SchemaVersion != "1" || response.Error.Code != wantCode || response.Error.Retryable != wantRetryable {
+	if response.Success || response.SchemaVersion != "2" || response.Error.Code != wantCode || response.Error.Retryable != wantRetryable {
 		t.Fatalf("task command error = %+v, want code %q retryable %t", response, wantCode, wantRetryable)
 	}
 	return response

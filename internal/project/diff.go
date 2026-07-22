@@ -35,7 +35,7 @@ func (p *Project) DiffTask(id, assignmentToken string) (TaskDiff, *Error) {
 	if strings.TrimSpace(assignmentToken) == "" {
 		return TaskDiff{}, invalid("assignment_token_required", "The current assignment token is required.")
 	}
-	if _, projectError := p.renewWorkerLease(id, assignmentToken, "editing"); projectError != nil {
+	if _, projectError := p.renewAgentLease(id, assignmentToken, "editing"); projectError != nil {
 		return TaskDiff{}, projectError
 	}
 	db, projectError := p.openState()

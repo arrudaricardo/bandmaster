@@ -38,7 +38,7 @@ func (p *Project) SubmitTask(id, assignmentToken string, handoff SubmissionHando
 			return Task{}, invalid("invalid_submission_handoff", fmt.Sprintf("Submission %s must not be empty; use an explicit value such as None when appropriate.", name))
 		}
 	}
-	if _, projectError := p.renewWorkerLease(id, assignmentToken, "editing"); projectError != nil {
+	if _, projectError := p.renewAgentLease(id, assignmentToken, "editing"); projectError != nil {
 		return Task{}, projectError
 	}
 	db, projectError := p.openState()
@@ -133,7 +133,7 @@ func (p *Project) SubmitTask(id, assignmentToken string, handoff SubmissionHando
 		return Task{}, sessionInternal(session.ID, "record task submission", err)
 	}
 	if _, err := tx.Exec(`UPDATE task_leases SET status = 'closed' WHERE task_id = ?`, id); err != nil {
-		return Task{}, sessionInternal(session.ID, "close submitted worker lease", err)
+		return Task{}, sessionInternal(session.ID, "close submitted agent lease", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return Task{}, sessionInternal(session.ID, "commit task submission", err)

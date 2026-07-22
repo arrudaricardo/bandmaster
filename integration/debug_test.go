@@ -21,15 +21,15 @@ type debugLease struct {
 }
 
 type debugTask struct {
-	ID             string      `json:"id"`
-	Status         string      `json:"status"`
-	WorkerIdentity string      `json:"worker_identity"`
-	Lease          *debugLease `json:"lease"`
+	ID            string      `json:"id"`
+	Status        string      `json:"status"`
+	AgentIdentity string      `json:"agent_identity"`
+	Lease         *debugLease `json:"lease"`
 }
 
 type debugAffected struct {
 	TaskIDs []string `json:"task_ids"`
-	Workers []string `json:"worker_identities"`
+	Agents  []string `json:"agent_identities"`
 	Paths   []string `json:"paths"`
 }
 
@@ -246,7 +246,7 @@ func TestDebugCorrelatesClaimsWithFilesInsideNewDirectories(t *testing.T) {
 		"--intent", "Exercise exact ownership diagnostics",
 		"--expected-outcome", "Only unclaimed files are reported",
 	)
-	assigned := successfulTaskCommand(t, repo, "assign", created.Result.ID, "--worker", "worker-generated")
+	assigned := successfulTaskCommand(t, repo, "assign", created.Result.ID, "--agent", "agent-generated")
 	successfulTaskCommand(t, repo, "claim", created.Result.ID,
 		"--token", assigned.Result.AssignmentToken,
 		"--path", "generated/one.txt",
@@ -297,7 +297,7 @@ func TestDebugPreservesTrackedGitStatusPaths(t *testing.T) {
 	}
 }
 
-func TestDebugLeaseDiagnosticsOnlyDescribeLiveWorkerOwnership(t *testing.T) {
+func TestDebugLeaseDiagnosticsOnlyDescribeLiveAgentOwnership(t *testing.T) {
 	repo := approvedCleanRepositoryWithLeaseDuration(t, "2s")
 	successfulSessionCommand(t, repo, "start")
 	live := successfulTaskCommand(t, repo, "create",
@@ -305,16 +305,16 @@ func TestDebugLeaseDiagnosticsOnlyDescribeLiveWorkerOwnership(t *testing.T) {
 		"--intent", "Keep active ownership actionable",
 		"--expected-outcome", "Lease timing is diagnosed",
 	)
-	live = successfulTaskCommand(t, repo, "assign", live.Result.ID, "--worker", "worker-live")
+	live = successfulTaskCommand(t, repo, "assign", live.Result.ID, "--agent", "agent-live")
 	terminal := successfulTaskCommand(t, repo, "create",
 		"--title", "Canceled leased work",
 		"--intent", "Preserve historical lease evidence",
 		"--expected-outcome", "Terminal history is not actionable",
 	)
-	terminal = successfulTaskCommand(t, repo, "assign", terminal.Result.ID, "--worker", "worker-terminal")
+	terminal = successfulTaskCommand(t, repo, "assign", terminal.Result.ID, "--agent", "agent-terminal")
 	terminal = successfulTaskCommand(t, repo, "cancel", terminal.Result.ID,
-		"--terminated-worker", "worker-terminal",
-		"--termination-proof", "codex-handle-worker-terminal-stopped",
+		"--terminated-agent", "agent-terminal",
+		"--termination-proof", "codex-handle-agent-terminal-stopped",
 	)
 
 	liveExpiry, err := time.Parse(time.RFC3339Nano, live.Result.Lease.ExpiresAt)
@@ -326,7 +326,7 @@ func TestDebugLeaseDiagnosticsOnlyDescribeLiveWorkerOwnership(t *testing.T) {
 	}
 	expiring := runDebugJSON(t, repo)
 	expiringDiagnostics := debugDiagnosticsByCode(expiring, "lease_expiring")
-	if len(expiringDiagnostics) != 1 || strings.Join(expiringDiagnostics[0].Affected.TaskIDs, ",") != live.Result.ID || strings.Join(expiringDiagnostics[0].Affected.Workers, ",") != "worker-live" {
+	if len(expiringDiagnostics) != 1 || strings.Join(expiringDiagnostics[0].Affected.TaskIDs, ",") != live.Result.ID || strings.Join(expiringDiagnostics[0].Affected.Agents, ",") != "agent-live" {
 		t.Fatalf("expiring diagnostics = %+v", expiringDiagnostics)
 	}
 	if len(expiringDiagnostics[0].SuggestedActions) == 0 || !strings.Contains(expiringDiagnostics[0].SuggestedActions[0], "task heartbeat "+live.Result.ID) {
@@ -338,10 +338,10 @@ func TestDebugLeaseDiagnosticsOnlyDescribeLiveWorkerOwnership(t *testing.T) {
 	}
 	expired := runDebugJSON(t, repo)
 	expiredDiagnostics := debugDiagnosticsByCode(expired, "lease_expired")
-	if len(expiredDiagnostics) != 1 || strings.Join(expiredDiagnostics[0].Affected.TaskIDs, ",") != live.Result.ID || strings.Join(expiredDiagnostics[0].Affected.Workers, ",") != "worker-live" || expiredDiagnostics[0].Severity != "error" {
+	if len(expiredDiagnostics) != 1 || strings.Join(expiredDiagnostics[0].Affected.TaskIDs, ",") != live.Result.ID || strings.Join(expiredDiagnostics[0].Affected.Agents, ",") != "agent-live" || expiredDiagnostics[0].Severity != "error" {
 		t.Fatalf("expired diagnostics = %+v", expiredDiagnostics)
 	}
-	if len(expiredDiagnostics[0].SuggestedActions) == 0 || !strings.Contains(expiredDiagnostics[0].SuggestedActions[0], "--terminated-worker worker-live") {
+	if len(expiredDiagnostics[0].SuggestedActions) == 0 || !strings.Contains(expiredDiagnostics[0].SuggestedActions[0], "--terminated-agent agent-live") {
 		t.Fatalf("expired recovery suggestion is unusable: %+v", expiredDiagnostics[0].SuggestedActions)
 	}
 	terminalSnapshot := debugTaskByID(t, expired, terminal.Result.ID)
@@ -350,8 +350,8 @@ func TestDebugLeaseDiagnosticsOnlyDescribeLiveWorkerOwnership(t *testing.T) {
 	}
 	for _, diagnostic := range expired.Result.Diagnostics {
 		for _, action := range diagnostic.SuggestedActions {
-			if strings.Contains(action, "--terminated-worker  ") {
-				t.Fatalf("suggested action contains an empty worker identity: %q", action)
+			if strings.Contains(action, "--terminated-agent  ") {
+				t.Fatalf("suggested action contains an empty agent identity: %q", action)
 			}
 		}
 	}
@@ -366,8 +366,8 @@ func TestDebugCompiledCLIKeepsTerminalHistoricalLeasesNonActionable(t *testing.T
 	successfulSessionCommand(t, repo, "start")
 	changed := successfulTaskCommand(t, repo, "create", "--title", "Committed terminal task", "--intent", "Create a committed task", "--expected-outcome", "Historical lease stays evidence-only")
 	noOp := successfulTaskCommand(t, repo, "create", "--title", "No-op terminal task", "--intent", "Create a no-op task", "--expected-outcome", "Historical lease stays evidence-only")
-	changedAssignment := successfulTaskCommand(t, repo, "assign", changed.Result.ID, "--worker", "worker-committed")
-	noOpAssignment := successfulTaskCommand(t, repo, "assign", noOp.Result.ID, "--worker", "worker-no-op")
+	changedAssignment := successfulTaskCommand(t, repo, "assign", changed.Result.ID, "--agent", "agent-committed")
+	noOpAssignment := successfulTaskCommand(t, repo, "assign", noOp.Result.ID, "--agent", "agent-no-op")
 	successfulTaskCommand(t, repo, "claim", changed.Result.ID, "--token", changedAssignment.Result.AssignmentToken, "--path", "changed-terminal.txt")
 	successfulTaskCommand(t, repo, "claim", noOp.Result.ID, "--token", noOpAssignment.Result.AssignmentToken, "--path", "unchanged-terminal.txt")
 	writeFile(t, filepath.Join(repo, "changed-terminal.txt"), "after\n")
@@ -472,7 +472,7 @@ func TestDebugUninitializedRepositoryIsUsefulAndReadOnly(t *testing.T) {
 	if err := json.Unmarshal([]byte(result.stdout), &response); err != nil {
 		t.Fatalf("decode debug response: %v\n%s", err, result.stdout)
 	}
-	if response.SchemaVersion != "1" || response.Command != "debug" || !response.Success || response.Result.ContractVersion != "1" {
+	if response.SchemaVersion != "2" || response.Command != "debug" || !response.Success || response.Result.ContractVersion != "2" {
 		t.Fatalf("unexpected response: %+v", response)
 	}
 	if response.Result.Collection.Status != "complete" || response.Result.State.Initialization != "uninitialized" {
@@ -766,7 +766,7 @@ func TestDebugNormalizesRelationshipsAndRedactsAuthority(t *testing.T) {
 	if err := json.Unmarshal([]byte(created.stdout), &task); err != nil {
 		t.Fatal(err)
 	}
-	assigned := runBandmaster(t, repo, "task", "assign", task.Result.ID, "--worker", "worker-debug", "--json")
+	assigned := runBandmaster(t, repo, "task", "assign", task.Result.ID, "--agent", "agent-debug", "--json")
 	if assigned.exitCode != 0 {
 		t.Fatalf("assign task: %s %s", assigned.stdout, assigned.stderr)
 	}
@@ -794,10 +794,10 @@ func TestDebugNormalizesRelationshipsAndRedactsAuthority(t *testing.T) {
 				AssignmentTokenFingerprint string `json:"assignment_token_fingerprint"`
 				AssignmentToken            string `json:"assignment_token"`
 			} `json:"tasks"`
-			Workers []struct {
-				WorkerIdentity string `json:"worker_identity"`
-				ActiveTaskID   string `json:"active_task_id"`
-			} `json:"workers"`
+			Agents []struct {
+				AgentIdentity string `json:"agent_identity"`
+				ActiveTaskID  string `json:"active_task_id"`
+			} `json:"agents"`
 			State struct {
 				SchemaVersion string `json:"schema_version"`
 			} `json:"state"`
@@ -812,8 +812,8 @@ func TestDebugNormalizesRelationshipsAndRedactsAuthority(t *testing.T) {
 	if len(response.Result.Tasks) != 1 || !response.Result.Tasks[0].AssignmentTokenPresent || response.Result.Tasks[0].AssignmentTokenFingerprint == "" || response.Result.Tasks[0].AssignmentToken != "" {
 		t.Fatalf("bad redacted task: %+v", response.Result.Tasks)
 	}
-	if len(response.Result.Workers) != 1 || response.Result.Workers[0].WorkerIdentity != "worker-debug" || response.Result.Workers[0].ActiveTaskID != task.Result.ID {
-		t.Fatalf("bad worker view: %+v", response.Result.Workers)
+	if len(response.Result.Agents) != 1 || response.Result.Agents[0].AgentIdentity != "agent-debug" || response.Result.Agents[0].ActiveTaskID != task.Result.ID {
+		t.Fatalf("bad agent view: %+v", response.Result.Agents)
 	}
 
 	unsafe := runBandmaster(t, repo, "debug", "--session", session.Result.ID, "--unsafe", "--json")

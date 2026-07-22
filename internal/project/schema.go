@@ -106,7 +106,7 @@ func (p *Project) openState() (*sql.DB, *Error) {
 			intent TEXT NOT NULL,
 			expected_outcome TEXT NOT NULL,
 			status TEXT NOT NULL CHECK (status IN ('planned', 'ready', 'assigned', 'editing', 'blocked', 'submitted', 'repair_pending', 'quarantined', 'committed', 'no_op', 'canceled')),
-			worker_identity TEXT,
+			agent_identity TEXT,
 			assignment_token TEXT,
 			core_frozen INTEGER NOT NULL DEFAULT 0 CHECK (core_frozen IN (0, 1)),
 			created_at TEXT NOT NULL,
@@ -127,13 +127,13 @@ func (p *Project) openState() (*sql.DB, *Error) {
 			event TEXT NOT NULL,
 			from_status TEXT,
 			to_status TEXT NOT NULL,
-			worker_identity TEXT,
+			agent_identity TEXT,
 			termination_proof TEXT,
 			occurred_at TEXT NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS task_recovery_events (
 			task_audit_sequence INTEGER PRIMARY KEY REFERENCES task_audit_events(sequence),
-			recovery_method TEXT NOT NULL CHECK (recovery_method IN ('worker_handle', 'user_confirmation')),
+			recovery_method TEXT NOT NULL CHECK (recovery_method IN ('agent_handle', 'user_confirmation')),
 			user_confirmation TEXT,
 			replacement_assignment_token TEXT
 		)`,
@@ -156,12 +156,12 @@ func (p *Project) openState() (*sql.DB, *Error) {
 			UNIQUE(session_id, creation_order)
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS one_collecting_batch ON batches(session_id) WHERE status = 'collecting'`,
-		`CREATE TABLE IF NOT EXISTS batch_members (
+		`CREATE TABLE IF NOT EXISTS batch_tasks (
 			batch_id TEXT NOT NULL REFERENCES batches(id),
 			task_id TEXT NOT NULL REFERENCES tasks(id),
-			membership_order INTEGER NOT NULL,
+			task_order INTEGER NOT NULL,
 			PRIMARY KEY(batch_id, task_id),
-			UNIQUE(batch_id, membership_order),
+			UNIQUE(batch_id, task_order),
 			UNIQUE(task_id)
 		)`,
 		`CREATE TABLE IF NOT EXISTS batch_freezes (
@@ -243,7 +243,7 @@ func (p *Project) openState() (*sql.DB, *Error) {
 		`CREATE TABLE IF NOT EXISTS frozen_batch_paths (
 			batch_id TEXT NOT NULL REFERENCES batches(id),
 			task_id TEXT NOT NULL REFERENCES tasks(id),
-			membership_order INTEGER NOT NULL,
+			task_order INTEGER NOT NULL,
 			claim_order INTEGER NOT NULL,
 			path TEXT NOT NULL,
 			baseline_presence TEXT NOT NULL CHECK (baseline_presence IN ('absent', 'present')),
@@ -380,7 +380,122 @@ func (p *Project) openState() (*sql.DB, *Error) {
 		db.Close()
 		return nil, projectError
 	}
+	if projectError := migrateAgentBatchTaskVocabulary(db); projectError != nil {
+		db.Close()
+		return nil, projectError
+	}
 	return db, nil
+}
+
+// migrateAgentBatchTaskVocabulary performs the v2 vocabulary cutover in one
+// transaction. Agents remain derived from Task evidence; this migration only
+// renames persisted attribution and ordered Batch Task records.
+func migrateAgentBatchTaskVocabulary(db *sql.DB) *Error {
+	legacyTasks, projectError := schemaColumnExists(db, "tasks", "worker_identity")
+	if projectError != nil {
+		return projectError
+	}
+	legacyBatchTasks, err := schemaTableExists(db, "batch_members")
+	if err != nil {
+		return internal("inspect legacy Batch Task schema", err)
+	}
+	if !legacyTasks && !legacyBatchTasks {
+		if _, err := db.Exec(`PRAGMA user_version = 2`); err != nil {
+			return internal("record state schema version 2", err)
+		}
+		return nil
+	}
+
+	if _, err := db.Exec(`PRAGMA foreign_keys = OFF`); err != nil {
+		return internal("prepare Agent and Batch Task schema migration", err)
+	}
+	defer func() { _, _ = db.Exec(`PRAGMA foreign_keys = ON`) }()
+	tx, err := db.Begin()
+	if err != nil {
+		return internal("begin Agent and Batch Task schema migration", err)
+	}
+	defer tx.Rollback()
+
+	statements := []string{}
+	if legacyTasks {
+		statements = append(statements,
+			`ALTER TABLE tasks RENAME COLUMN worker_identity TO agent_identity`,
+			`ALTER TABLE task_audit_events RENAME COLUMN worker_identity TO agent_identity`,
+			`ALTER TABLE task_recovery_events RENAME TO task_recovery_events_v1`,
+			`CREATE TABLE task_recovery_events (
+				task_audit_sequence INTEGER PRIMARY KEY REFERENCES task_audit_events(sequence),
+				recovery_method TEXT NOT NULL CHECK (recovery_method IN ('agent_handle', 'user_confirmation')),
+				user_confirmation TEXT,
+				replacement_assignment_token TEXT
+			)`,
+			`INSERT INTO task_recovery_events(task_audit_sequence, recovery_method, user_confirmation, replacement_assignment_token)
+			 SELECT task_audit_sequence, CASE recovery_method WHEN 'worker_handle' THEN 'agent_handle' ELSE recovery_method END, user_confirmation, replacement_assignment_token FROM task_recovery_events_v1`,
+			`DROP TABLE task_recovery_events_v1`,
+			`ALTER TABLE task_repair_snapshots RENAME TO task_repair_snapshots_v1`,
+			`ALTER TABLE task_repair_events RENAME TO task_repair_events_v1`,
+			repairEventsTableSQL,
+			repairSnapshotsTableSQL,
+			`INSERT INTO task_repair_events(task_audit_sequence, diagnosis, intended_repair, recovery_method, user_confirmation, replacement_assignment_token, invalidated_submission_json)
+			 SELECT task_audit_sequence, diagnosis, intended_repair, CASE recovery_method WHEN 'worker_handle' THEN 'agent_handle' ELSE recovery_method END, user_confirmation, replacement_assignment_token, invalidated_submission_json FROM task_repair_events_v1`,
+			`INSERT INTO task_repair_snapshots(task_audit_sequence, task_id, path, presence, file_type, content_hash, executable, content, invalidated_presence, invalidated_type, invalidated_content_hash, invalidated_executable, invalidated_content)
+			 SELECT task_audit_sequence, task_id, path, presence, file_type, content_hash, executable, content, invalidated_presence, invalidated_type, invalidated_content_hash, invalidated_executable, invalidated_content FROM task_repair_snapshots_v1`,
+			`DROP TABLE task_repair_snapshots_v1`,
+			`DROP TABLE task_repair_events_v1`,
+		)
+	}
+	if legacyBatchTasks {
+		statements = append(statements,
+			`INSERT INTO batch_tasks(batch_id, task_id, task_order) SELECT batch_id, task_id, membership_order FROM batch_members`,
+			`ALTER TABLE frozen_batch_paths RENAME COLUMN membership_order TO task_order`,
+			`DROP TABLE batch_members`,
+		)
+	}
+	statements = append(statements, `PRAGMA user_version = 2`)
+	for _, statement := range statements {
+		if _, err := tx.Exec(statement); err != nil {
+			_ = tx.Rollback()
+			removeV2BatchTaskTableAfterFailedMigration(db, legacyBatchTasks)
+			return internal("migrate Agent and Batch Task vocabulary", err)
+		}
+	}
+	rows, err := tx.Query(`PRAGMA foreign_key_check`)
+	if err != nil {
+		_ = tx.Rollback()
+		removeV2BatchTaskTableAfterFailedMigration(db, legacyBatchTasks)
+		return internal("verify Agent and Batch Task migration", err)
+	}
+	if rows.Next() {
+		_ = rows.Close()
+		_ = tx.Rollback()
+		removeV2BatchTaskTableAfterFailedMigration(db, legacyBatchTasks)
+		return internal("verify Agent and Batch Task migration", errors.New("foreign-key integrity check failed"))
+	}
+	if err := rows.Close(); err != nil {
+		_ = tx.Rollback()
+		removeV2BatchTaskTableAfterFailedMigration(db, legacyBatchTasks)
+		return internal("close Agent and Batch Task migration verification", err)
+	}
+	if err := tx.Commit(); err != nil {
+		_ = tx.Rollback()
+		removeV2BatchTaskTableAfterFailedMigration(db, legacyBatchTasks)
+		return internal("commit Agent and Batch Task schema migration", err)
+	}
+	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		return internal("restore foreign keys after Agent and Batch Task migration", err)
+	}
+	return nil
+}
+
+func removeV2BatchTaskTableAfterFailedMigration(db *sql.DB, legacyBatchTasks bool) {
+	if legacyBatchTasks {
+		_, _ = db.Exec(`DROP TABLE IF EXISTS batch_tasks`)
+	}
+}
+
+func schemaTableExists(db *sql.DB, table string) (bool, error) {
+	var found int
+	err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&found)
+	return found == 1, err
 }
 
 func migrateFinalizationRecoverySchema(db *sql.DB) *Error {
@@ -437,7 +552,7 @@ const repairEventsTableSQL = `CREATE TABLE IF NOT EXISTS task_repair_events (
 			task_audit_sequence INTEGER PRIMARY KEY REFERENCES task_audit_events(sequence),
 			diagnosis TEXT NOT NULL,
 			intended_repair TEXT NOT NULL,
-			recovery_method TEXT NOT NULL CHECK (recovery_method IN ('worker_handle', 'user_confirmation')),
+			recovery_method TEXT NOT NULL CHECK (recovery_method IN ('agent_handle', 'user_confirmation')),
 			user_confirmation TEXT,
 			replacement_assignment_token TEXT,
 			invalidated_submission_json TEXT

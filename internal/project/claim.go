@@ -52,7 +52,7 @@ func (p *Project) PreflightTask(id string, request ClaimRequest) (PreflightResul
 	if projectError := p.validateClaimRequest(request); projectError != nil {
 		return PreflightResult{}, projectError
 	}
-	if _, projectError := p.renewWorkerLease(id, request.AssignmentToken, "assigned"); projectError != nil {
+	if _, projectError := p.renewAgentLease(id, request.AssignmentToken, "assigned"); projectError != nil {
 		return PreflightResult{}, projectError
 	}
 	db, projectError := p.openState()
@@ -98,7 +98,7 @@ func (p *Project) ClaimTask(id string, request ClaimRequest) (Task, *Error) {
 	if projectError := p.validateClaimRequest(request); projectError != nil {
 		return Task{}, projectError
 	}
-	if _, projectError := p.renewWorkerLease(id, request.AssignmentToken, "assigned", "editing"); projectError != nil {
+	if _, projectError := p.renewAgentLease(id, request.AssignmentToken, "assigned", "editing"); projectError != nil {
 		return Task{}, projectError
 	}
 	db, projectError := p.openState()
@@ -164,11 +164,11 @@ func (p *Project) ClaimTask(id string, request ClaimRequest) (Task, *Error) {
 			return Task{}, projectError
 		}
 		now := time.Now().UTC().Format(time.RFC3339Nano)
-		if _, err := tx.Exec(`UPDATE tasks SET status = 'blocked', worker_identity = NULL, assignment_token = NULL, updated_at = ? WHERE id = ? AND status = 'assigned'`, now, id); err != nil {
+		if _, err := tx.Exec(`UPDATE tasks SET status = 'blocked', agent_identity = NULL, assignment_token = NULL, updated_at = ? WHERE id = ? AND status = 'assigned'`, now, id); err != nil {
 			return Task{}, sessionInternal(session.ID, "block task after claim contention", err)
 		}
 		if _, err := tx.Exec(`UPDATE task_leases SET status = 'closed' WHERE task_id = ?`, id); err != nil {
-			return Task{}, sessionInternal(session.ID, "close blocked worker lease", err)
+			return Task{}, sessionInternal(session.ID, "close blocked agent lease", err)
 		}
 		if _, err := tx.Exec(`INSERT INTO task_audit_events(session_id, task_id, event, from_status, to_status, occurred_at) VALUES(?, ?, 'task_blocked', 'assigned', 'blocked', ?)`, session.ID, id, now); err != nil {
 			return Task{}, sessionInternal(session.ID, "record blocked task", err)
@@ -184,7 +184,7 @@ func (p *Project) ClaimTask(id string, request ClaimRequest) (Task, *Error) {
 		}
 		var batchID string
 		var nextOrder int
-		if err := tx.QueryRow(`SELECT batch_id FROM batch_members WHERE task_id = ?`, id).Scan(&batchID); err != nil {
+		if err := tx.QueryRow(`SELECT batch_id FROM batch_tasks WHERE task_id = ?`, id).Scan(&batchID); err != nil {
 			return Task{}, sessionInternal(session.ID, "read task batch for claim expansion", err)
 		}
 		if err := tx.QueryRow(`SELECT COALESCE(MAX(claim_order), 0) + 1 FROM claims WHERE task_id = ?`, id).Scan(&nextOrder); err != nil {
@@ -217,11 +217,11 @@ func (p *Project) ClaimTask(id string, request ClaimRequest) (Task, *Error) {
 	if projectError != nil {
 		if projectError.Code == "batch_repair_in_progress" {
 			now := time.Now().UTC().Format(time.RFC3339Nano)
-			if _, err := tx.Exec(`UPDATE tasks SET status = 'blocked', worker_identity = NULL, assignment_token = NULL, updated_at = ? WHERE id = ? AND status = 'assigned'`, now, id); err != nil {
+			if _, err := tx.Exec(`UPDATE tasks SET status = 'blocked', agent_identity = NULL, assignment_token = NULL, updated_at = ? WHERE id = ? AND status = 'assigned'`, now, id); err != nil {
 				return Task{}, sessionInternal(session.ID, "block unrelated task during batch repair", err)
 			}
 			if _, err := tx.Exec(`UPDATE task_leases SET status = 'closed' WHERE task_id = ?`, id); err != nil {
-				return Task{}, sessionInternal(session.ID, "close unrelated worker lease during batch repair", err)
+				return Task{}, sessionInternal(session.ID, "close unrelated agent lease during batch repair", err)
 			}
 			if _, err := tx.Exec(`INSERT INTO task_audit_events(session_id, task_id, event, from_status, to_status, occurred_at) VALUES(?, ?, 'task_blocked', 'assigned', 'blocked', ?)`, session.ID, id, now); err != nil {
 				return Task{}, sessionInternal(session.ID, "record unrelated task blocked during batch repair", err)
@@ -233,11 +233,11 @@ func (p *Project) ClaimTask(id string, request ClaimRequest) (Task, *Error) {
 		return Task{}, projectError
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	var membershipOrder int
-	if err := tx.QueryRow(`SELECT COALESCE(MAX(membership_order), 0) + 1 FROM batch_members WHERE batch_id = ?`, batchID).Scan(&membershipOrder); err != nil {
-		return Task{}, sessionInternal(session.ID, "choose batch membership order", err)
+	var taskOrder int
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(task_order), 0) + 1 FROM batch_tasks WHERE batch_id = ?`, batchID).Scan(&taskOrder); err != nil {
+		return Task{}, sessionInternal(session.ID, "choose Batch Task order", err)
 	}
-	if _, err := tx.Exec(`INSERT INTO batch_members(batch_id, task_id, membership_order) VALUES(?, ?, ?)`, batchID, id, membershipOrder); err != nil {
+	if _, err := tx.Exec(`INSERT INTO batch_tasks(batch_id, task_id, task_order) VALUES(?, ?, ?)`, batchID, id, taskOrder); err != nil {
 		return Task{}, sessionInternal(session.ID, "join collecting batch", err)
 	}
 	for index, claim := range claims {
@@ -365,7 +365,7 @@ func (p *Project) ReleaseTaskClaims(id, assignmentToken string, paths []string) 
 		}
 		seen[claimPath] = struct{}{}
 	}
-	if _, projectError := p.renewWorkerLease(id, assignmentToken, "editing"); projectError != nil {
+	if _, projectError := p.renewAgentLease(id, assignmentToken, "editing"); projectError != nil {
 		return Task{}, projectError
 	}
 	db, projectError := p.openState()

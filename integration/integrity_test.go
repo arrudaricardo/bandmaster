@@ -19,7 +19,7 @@ func TestIntegrityRecoveryRestoresFinalizingSessionAndIsIdempotent(t *testing.T)
 	runGit(t, repo, "commit", "-m", "Add recovery fixture")
 	started := successfulSessionCommand(t, repo, "start")
 	task := successfulTaskCommand(t, repo, "create", "--title", "Recover finalization", "--intent", "Restore a finalizing batch", "--expected-outcome", "Commit remains available")
-	assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-recovery")
+	assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "agent-recovery")
 	successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assigned.Result.AssignmentToken, "--path", "recovered.txt")
 	writeFile(t, filepath.Join(repo, "recovered.txt"), "submitted\n")
 	submitBatchTask(t, repo, task.Result.ID, assigned.Result.AssignmentToken)
@@ -93,7 +93,7 @@ func TestMutationRejectsIncompatibleSessionBatchPairWithoutDurableChanges(t *tes
 	runGit(t, repo, "commit", "-m", "Add incompatible state fixture")
 	started := successfulSessionCommand(t, repo, "start")
 	task := successfulTaskCommand(t, repo, "create", "--title", "Existing task", "--intent", "Retain state", "--expected-outcome", "Rejected mutation is atomic")
-	assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-incompatible")
+	assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "agent-incompatible")
 	claimed := successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assigned.Result.AssignmentToken, "--path", "incompatible.txt")
 
 	state, err := sql.Open("sqlite3", filepath.Join(repo, ".git", "bandmaster", "state.db"))
@@ -225,7 +225,7 @@ func TestSubmittedPathDriftQuarantinesAndRestoresAffectedWork(t *testing.T) {
 	runGit(t, repo, "-c", "user.name=Bandmaster Tests", "-c", "user.email=bandmaster@example.invalid", "commit", "-m", "Add submitted fixture")
 	successfulSessionCommand(t, repo, "start")
 	task := successfulTaskCommand(t, repo, "create", "--title", "Freeze work", "--intent", "Submit exact content", "--expected-outcome", "Later edits quarantine")
-	assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-submitted-drift")
+	assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "agent-submitted-drift")
 	successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assigned.Result.AssignmentToken, "--path", "submitted.txt")
 	writeFile(t, filepath.Join(repo, "submitted.txt"), "submitted content\n")
 	if result := runBandmaster(t, repo, "task", "diff", task.Result.ID, "--token", assigned.Result.AssignmentToken, "--json"); result.exitCode != 0 {
@@ -339,7 +339,7 @@ func TestIgnoredUntrackedPathsStayOutsideOwnershipWhileTrackedPathsRemainCovered
 	writeFile(t, filepath.Join(repo, "cache", "artifact.txt"), "ignored\n")
 
 	task := successfulTaskCommand(t, repo, "create", "--title", "Ignore policy", "--intent", "Keep ignored output unowned", "--expected-outcome", "Ignored claims fail")
-	assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-ignore")
+	assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "agent-ignore")
 	ignoredClaim := runBandmaster(t, repo, "task", "claim", task.Result.ID, "--token", assigned.Result.AssignmentToken, "--path", "cache/artifact.txt", "--json")
 	assertTaskError(t, ignoredClaim, 3, "ignored_untracked_path", false)
 

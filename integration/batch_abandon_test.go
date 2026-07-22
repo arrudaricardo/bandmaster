@@ -51,9 +51,9 @@ func TestBatchAbandonDoesNotReplayAnEarlierBatchForTheLatestBatch(t *testing.T) 
 	repo := repositoryWithValidation(t, "")
 	successfulSessionCommand(t, repo, "start")
 	firstTask := successfulTaskCommand(t, repo, "create", "--title", "First batch", "--intent", "Abandon first work", "--expected-outcome", "First batch is abandoned")
-	firstAssignment := successfulTaskCommand(t, repo, "assign", firstTask.Result.ID, "--worker", "first-abandon-worker")
+	firstAssignment := successfulTaskCommand(t, repo, "assign", firstTask.Result.ID, "--agent", "first-abandon-agent")
 	firstClaim := successfulTaskCommand(t, repo, "claim", firstTask.Result.ID, "--token", firstAssignment.Result.AssignmentToken, "--path", "first-abandoned.txt")
-	first := runBandmaster(t, repo, "batch", "abandon", "--reason", "first approach superseded", "--confirmation", "first worker stopped", "--json")
+	first := runBandmaster(t, repo, "batch", "abandon", "--reason", "first approach superseded", "--confirmation", "first agent stopped", "--json")
 	if first.exitCode != 0 {
 		t.Fatalf("abandon first batch: %+v", first)
 	}
@@ -67,12 +67,12 @@ func TestBatchAbandonDoesNotReplayAnEarlierBatchForTheLatestBatch(t *testing.T) 
 	successfulSessionCommand(t, repo, "resume")
 
 	secondTask := successfulTaskCommand(t, repo, "create", "--title", "Second batch", "--intent", "Abandon later work", "--expected-outcome", "Second batch gets its own event")
-	secondAssignment := successfulTaskCommand(t, repo, "assign", secondTask.Result.ID, "--worker", "second-abandon-worker")
+	secondAssignment := successfulTaskCommand(t, repo, "assign", secondTask.Result.ID, "--agent", "second-abandon-agent")
 	secondClaim := successfulTaskCommand(t, repo, "claim", secondTask.Result.ID, "--token", secondAssignment.Result.AssignmentToken, "--path", "second-abandoned.txt")
 	if secondClaim.Result.BatchID == firstClaim.Result.BatchID {
 		t.Fatalf("later work reused abandoned batch %s", secondClaim.Result.BatchID)
 	}
-	second := runBandmaster(t, repo, "batch", "abandon", "--reason", "second approach superseded", "--confirmation", "second worker stopped", "--json")
+	second := runBandmaster(t, repo, "batch", "abandon", "--reason", "second approach superseded", "--confirmation", "second agent stopped", "--json")
 	if second.exitCode != 0 {
 		t.Fatalf("abandon second batch: %+v", second)
 	}
@@ -95,7 +95,7 @@ func TestBatchAbandonPreservesCollectingWorkAndOwnershipAndIsIdempotent(t *testi
 	repo := repositoryWithValidation(t, "")
 	successfulSessionCommand(t, repo, "start")
 	task := successfulTaskCommand(t, repo, "create", "--title", "Abandon edit", "--intent", "Preserve unfinished work", "--expected-outcome", "Audited abandonment")
-	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "abandon-worker")
+	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "abandon-agent")
 	successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "abandoned.txt")
 	writeFile(t, filepath.Join(repo, "abandoned.txt"), "preserved abandonment\n")
 
@@ -103,12 +103,12 @@ func TestBatchAbandonPreservesCollectingWorkAndOwnershipAndIsIdempotent(t *testi
 	if missing.exitCode != 3 || !strings.Contains(missing.stdout, "batch_abandonment_reason_required") {
 		t.Fatalf("abandonment did not require reason and confirmation: %+v", missing)
 	}
-	abandoned := runBandmaster(t, repo, "batch", "abandon", "--reason", "superseded approach", "--confirmation", "worker handle stopped", "--json")
+	abandoned := runBandmaster(t, repo, "batch", "abandon", "--reason", "superseded approach", "--confirmation", "agent handle stopped", "--json")
 	if abandoned.exitCode != 0 {
 		t.Fatalf("collecting abandonment failed: %+v", abandoned)
 	}
 	response := decodeBatchAbandon(t, abandoned)
-	if response.SchemaVersion != "1" || response.Command != "batch abandon" || !response.Success || response.Result.Outcome != "abandoned" || !response.Result.Idempotent || response.Result.Before.SessionStatus != "active" || response.Result.Before.BatchStatus != "collecting" || response.Result.After.SessionStatus != "paused" || response.Result.After.BatchStatus != "abandoned" || response.Result.NextAction != "session abort or inspect preserved edits" || len(response.Result.ReleasedClaims) != 1 {
+	if response.SchemaVersion != "2" || response.Command != "batch abandon" || !response.Success || response.Result.Outcome != "abandoned" || !response.Result.Idempotent || response.Result.Before.SessionStatus != "active" || response.Result.Before.BatchStatus != "collecting" || response.Result.After.SessionStatus != "paused" || response.Result.After.BatchStatus != "abandoned" || response.Result.NextAction != "session abort or inspect preserved edits" || len(response.Result.ReleasedClaims) != 1 {
 		t.Fatalf("unexpected collecting abandonment: %+v", response)
 	}
 	if content := readFile(t, filepath.Join(repo, "abandoned.txt")); content != "preserved abandonment\n" {
@@ -128,7 +128,7 @@ func TestBatchAbandonReconcilesInterruptedFinalizationBeforeReleasingClaims(t *t
 	repo := repositoryWithValidation(t, "")
 	started := successfulSessionCommand(t, repo, "start")
 	task := successfulTaskCommand(t, repo, "create", "--title", "Abandon finalization", "--intent", "Recover provisional state", "--expected-outcome", "Preserved work")
-	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "finalization-abandon-worker")
+	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "finalization-abandon-agent")
 	successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "owned.txt")
 	writeFile(t, filepath.Join(repo, "owned.txt"), "abandoned finalization\n")
 	submitBatchTask(t, repo, task.Result.ID, assignment.Result.AssignmentToken)
@@ -166,7 +166,7 @@ func TestBatchAbandonFailsClosedOnAmbiguousFinalizationGitState(t *testing.T) {
 	repo := repositoryWithValidation(t, "")
 	successfulSessionCommand(t, repo, "start")
 	task := successfulTaskCommand(t, repo, "create", "--title", "Ambiguous abandon", "--intent", "Refuse unsafe cleanup", "--expected-outcome", "Quarantine")
-	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "ambiguous-abandon-worker")
+	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "ambiguous-abandon-agent")
 	successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "owned.txt")
 	writeFile(t, filepath.Join(repo, "owned.txt"), "submitted\n")
 	submitBatchTask(t, repo, task.Result.ID, assignment.Result.AssignmentToken)

@@ -60,11 +60,11 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	if command == "version" {
 		result := versionResult{
 			Version:                 Version,
-			JSONSchemaVersion:       "1",
-			JSONSchemaCompatibility: "Schema 1 fields will not be removed or change meaning; additive fields may be introduced.",
+			JSONSchemaVersion:       "2",
+			JSONSchemaCompatibility: "Schema 2 is the breaking Agent and Batch Task contract; legacy Worker and Member fields are not emitted.",
 		}
 		if jsonOutput {
-			return writeJSON(stdout, envelope{SchemaVersion: "1", Command: command, Success: true, Result: result})
+			return writeJSON(stdout, envelope{SchemaVersion: "2", Command: command, Success: true, Result: result})
 		}
 		return writeHuman(stdout, "bandmaster %s\n", Version)
 	}
@@ -109,7 +109,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			return writeProjectError(stdout, stderr, jsonOutput, command, projectError)
 		}
 		if jsonOutput {
-			return writeJSON(stdout, envelope{SchemaVersion: "1", Command: command, Success: true, Result: result})
+			return writeJSON(stdout, envelope{SchemaVersion: "2", Command: command, Success: true, Result: result})
 		}
 		if result.Healthy {
 			return writeHuman(stdout, "Bandmaster state is healthy.\n")
@@ -121,7 +121,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			return writeProjectError(stdout, stderr, jsonOutput, command, projectError)
 		}
 		if jsonOutput {
-			return writeJSON(stdout, envelope{SchemaVersion: "1", Command: command, Success: true, Result: result})
+			return writeJSON(stdout, envelope{SchemaVersion: "2", Command: command, Success: true, Result: result})
 		}
 		message := fmt.Sprintf("Initialized Bandmaster.\nValidation digest: %s\nApproved: %t\n", result.ValidationDigest, result.Approved)
 		if result.DebugSkillPath != "" {
@@ -137,7 +137,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			return writeProjectError(stdout, stderr, jsonOutput, command, projectError)
 		}
 		if jsonOutput {
-			return writeJSON(stdout, envelope{SchemaVersion: "1", Command: command, Success: true, Result: result})
+			return writeJSON(stdout, envelope{SchemaVersion: "2", Command: command, Success: true, Result: result})
 		}
 		message := fmt.Sprintf("Validation digest: %s\nApproved: %t\n", result.ValidationDigest, result.Approved)
 		if !result.Approved {
@@ -150,7 +150,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			return writeProjectError(stdout, stderr, jsonOutput, command, projectError)
 		}
 		if jsonOutput {
-			return writeJSON(stdout, envelope{SchemaVersion: "1", Command: command, Success: true, Result: result})
+			return writeJSON(stdout, envelope{SchemaVersion: "2", Command: command, Success: true, Result: result})
 		}
 		return writeHuman(stdout, "Approved validation configuration %s.\n", result.ValidationDigest)
 	case "session start":
@@ -178,7 +178,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 				return writeProjectError(stdout, stderr, jsonOutput, command, projectError)
 			}
 			if jsonOutput {
-				return writeJSON(stdout, envelope{SchemaVersion: "1", Command: command, Success: true, SessionID: result.SessionID, Result: result})
+				return writeJSON(stdout, envelope{SchemaVersion: "2", Command: command, Success: true, SessionID: result.SessionID, Result: result})
 			}
 			return writeHuman(stdout, "Abort plan for session %s: %d task(s), %d active claim(s), %d blocker(s).\n", result.SessionID, len(result.AffectedTasks), len(result.ActiveClaims), len(result.Blockers))
 		}
@@ -207,7 +207,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			return writeProjectError(stdout, stderr, jsonOutput, command, projectError)
 		}
 		if jsonOutput {
-			return writeJSON(stdout, envelope{SchemaVersion: "1", Command: command, Success: true, SessionID: result.SessionID, Result: result})
+			return writeJSON(stdout, envelope{SchemaVersion: "2", Command: command, Success: true, SessionID: result.SessionID, Result: result})
 		}
 		return writeHuman(stdout, "Finalization recovery for batch %s: %s (%s).\n", result.BatchID, result.Action, result.Outcome)
 	case "batch freeze":
@@ -238,7 +238,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			return writeProjectError(stdout, stderr, jsonOutput, command, projectError)
 		}
 		if jsonOutput {
-			return writeJSON(stdout, envelope{SchemaVersion: "1", Command: command, Success: true, SessionID: result.SessionID, Result: result})
+			return writeJSON(stdout, envelope{SchemaVersion: "2", Command: command, Success: true, SessionID: result.SessionID, Result: result})
 		}
 		return writeHuman(stdout, "Batch %s is abandoned.\nNext action: %s.\n", result.BatchID, result.NextAction)
 	case "batch inspect":
@@ -272,7 +272,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			return writeProjectError(stdout, stderr, jsonOutput, command, projectError)
 		}
 		if jsonOutput {
-			return writeJSON(stdout, envelope{SchemaVersion: "1", Command: command, Success: true, SessionID: sessionID, Result: result})
+			return writeJSON(stdout, envelope{SchemaVersion: "2", Command: command, Success: true, SessionID: sessionID, Result: result})
 		}
 		if len(result.Tasks) == 0 {
 			return writeHuman(stdout, "No tasks in session %s.\n", sessionID)
@@ -290,17 +290,17 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		}
 		return writeTask(stdout, jsonOutput, command, result)
 	case "task assign":
-		options, optionError := parseTaskOptions(args[3:], map[string]bool{"--worker": true})
+		options, optionError := parseTaskOptions(args[3:], map[string]bool{"--agent": true})
 		if optionError != nil {
 			return writeError(stdout, stderr, jsonOutput, command, "invalid_arguments", optionError.Error(), false, exitInvalid)
 		}
-		result, projectError := currentProject.AssignTask(args[2], oneOption(options, "--worker"))
+		result, projectError := currentProject.AssignTask(args[2], oneOption(options, "--agent"))
 		if projectError != nil {
 			return writeProjectError(stdout, stderr, jsonOutput, command, projectError)
 		}
 		return writeTask(stdout, jsonOutput, command, result)
 	case "task replan":
-		options, optionError := parseTaskOptions(args[3:], map[string]bool{"--title": true, "--intent": true, "--expected-outcome": true, "--prerequisite": true, "--terminated-worker": true, "--termination-proof": true})
+		options, optionError := parseTaskOptions(args[3:], map[string]bool{"--title": true, "--intent": true, "--expected-outcome": true, "--prerequisite": true, "--terminated-agent": true, "--termination-proof": true})
 		if optionError != nil {
 			return writeError(stdout, stderr, jsonOutput, command, "invalid_arguments", optionError.Error(), false, exitInvalid)
 		}
@@ -309,17 +309,17 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			Intent:          oneOption(options, "--intent"),
 			ExpectedOutcome: oneOption(options, "--expected-outcome"),
 			Prerequisites:   options["--prerequisite"],
-		}, oneOption(options, "--terminated-worker"), oneOption(options, "--termination-proof"))
+		}, oneOption(options, "--terminated-agent"), oneOption(options, "--termination-proof"))
 		if projectError != nil {
 			return writeProjectError(stdout, stderr, jsonOutput, command, projectError)
 		}
 		return writeTask(stdout, jsonOutput, command, result)
 	case "task cancel":
-		options, optionError := parseTaskOptions(args[3:], map[string]bool{"--terminated-worker": true, "--termination-proof": true})
+		options, optionError := parseTaskOptions(args[3:], map[string]bool{"--terminated-agent": true, "--termination-proof": true})
 		if optionError != nil {
 			return writeError(stdout, stderr, jsonOutput, command, "invalid_arguments", optionError.Error(), false, exitInvalid)
 		}
-		result, projectError := currentProject.CancelTask(args[2], oneOption(options, "--terminated-worker"), oneOption(options, "--termination-proof"))
+		result, projectError := currentProject.CancelTask(args[2], oneOption(options, "--terminated-agent"), oneOption(options, "--termination-proof"))
 		if projectError != nil {
 			return writeProjectError(stdout, stderr, jsonOutput, command, projectError)
 		}
@@ -331,12 +331,12 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		}
 		return writeTask(stdout, jsonOutput, command, result)
 	case "task recover":
-		options, optionError := parseTaskOptions(args[3:], map[string]bool{"--terminated-worker": true, "--termination-proof": true, "--user-confirmation": true, "--diagnosis": true, "--intended-repair": true})
+		options, optionError := parseTaskOptions(args[3:], map[string]bool{"--terminated-agent": true, "--termination-proof": true, "--user-confirmation": true, "--diagnosis": true, "--intended-repair": true})
 		if optionError != nil {
 			return writeError(stdout, stderr, jsonOutput, command, "invalid_arguments", optionError.Error(), false, exitInvalid)
 		}
 		result, projectError := currentProject.RecoverTask(args[2], project.RepairRequest{
-			TerminatedWorker: oneOption(options, "--terminated-worker"),
+			TerminatedAgent:  oneOption(options, "--terminated-agent"),
 			TerminationProof: oneOption(options, "--termination-proof"),
 			UserConfirmation: oneOption(options, "--user-confirmation"),
 			Diagnosis:        oneOption(options, "--diagnosis"),
@@ -347,12 +347,12 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		}
 		return writeTask(stdout, jsonOutput, command, result)
 	case "task repair":
-		options, optionError := parseTaskOptions(args[3:], map[string]bool{"--terminated-worker": true, "--termination-proof": true, "--user-confirmation": true, "--diagnosis": true, "--intended-repair": true})
+		options, optionError := parseTaskOptions(args[3:], map[string]bool{"--terminated-agent": true, "--termination-proof": true, "--user-confirmation": true, "--diagnosis": true, "--intended-repair": true})
 		if optionError != nil {
 			return writeError(stdout, stderr, jsonOutput, command, "invalid_arguments", optionError.Error(), false, exitInvalid)
 		}
 		result, projectError := currentProject.RepairTask(args[2], project.RepairRequest{
-			TerminatedWorker: oneOption(options, "--terminated-worker"),
+			TerminatedAgent:  oneOption(options, "--terminated-agent"),
 			TerminationProof: oneOption(options, "--termination-proof"),
 			UserConfirmation: oneOption(options, "--user-confirmation"),
 			Diagnosis:        oneOption(options, "--diagnosis"),
@@ -382,7 +382,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 				return writeProjectError(stdout, stderr, jsonOutput, command, projectError)
 			}
 			if jsonOutput {
-				return writeJSON(stdout, envelope{SchemaVersion: "1", Command: command, Success: true, SessionID: result.SessionID, Result: result})
+				return writeJSON(stdout, envelope{SchemaVersion: "2", Command: command, Success: true, SessionID: result.SessionID, Result: result})
 			}
 			return writeHuman(stdout, "Preflight passed for task %s with %d path(s).\n", result.TaskID, len(result.Paths))
 		}
@@ -421,7 +421,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			return writeProjectError(stdout, stderr, jsonOutput, command, projectError)
 		}
 		if jsonOutput {
-			return writeJSON(stdout, envelope{SchemaVersion: "1", Command: command, Success: true, SessionID: result.SessionID, Result: result})
+			return writeJSON(stdout, envelope{SchemaVersion: "2", Command: command, Success: true, SessionID: result.SessionID, Result: result})
 		}
 		for _, path := range result.Paths {
 			if path.Patch != "" {

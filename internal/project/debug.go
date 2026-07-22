@@ -23,7 +23,7 @@ import (
 	"time"
 )
 
-const DebugContractVersion = "1"
+const DebugContractVersion = "2"
 
 type DebugOptions struct {
 	SessionID        string
@@ -47,7 +47,7 @@ type DebugSnapshot struct {
 	Configuration   DebugConfiguration    `json:"configuration"`
 	Session         *DebugSession         `json:"session,omitempty"`
 	Tasks           []DebugTask           `json:"tasks"`
-	Workers         []DebugWorker         `json:"workers"`
+	Agents          []DebugAgent          `json:"agents"`
 	Batches         []DebugBatch          `json:"batches"`
 	Monitors        []DebugMonitor        `json:"monitors"`
 	Integrity       []DebugIntegrity      `json:"integrity_violations"`
@@ -164,7 +164,7 @@ type DebugTask struct {
 	CreationOrder          int64            `json:"creation_order"`
 	Title                  string           `json:"title"`
 	Status                 string           `json:"status"`
-	WorkerIdentity         string           `json:"worker_identity,omitempty"`
+	AgentIdentity          string           `json:"agent_identity,omitempty"`
 	AssignmentTokenPresent bool             `json:"assignment_token_present"`
 	AssignmentTokenHash    string           `json:"assignment_token_fingerprint,omitempty"`
 	AssignmentToken        string           `json:"assignment_token,omitempty"`
@@ -178,8 +178,8 @@ type DebugTask struct {
 	UpdatedAt              string           `json:"updated_at"`
 }
 
-type DebugWorker struct {
-	WorkerIdentity string      `json:"worker_identity"`
+type DebugAgent struct {
+	AgentIdentity  string      `json:"agent_identity"`
 	TaskIDs        []string    `json:"task_ids"`
 	ActiveTaskID   string      `json:"active_task_id,omitempty"`
 	Lease          *DebugLease `json:"lease,omitempty"`
@@ -194,11 +194,17 @@ type DebugBatch struct {
 	Status        string                   `json:"status"`
 	BaseBranch    string                   `json:"base_branch"`
 	BaseCommit    string                   `json:"base_commit"`
-	MemberTaskIDs []string                 `json:"member_task_ids"`
+	Tasks         []DebugBatchTask         `json:"tasks"`
 	Manifest      []DebugManifestPath      `json:"manifest"`
 	Validation    []DebugValidationAttempt `json:"validation"`
 	CreatedAt     string                   `json:"created_at"`
 	UpdatedAt     string                   `json:"updated_at"`
+}
+
+type DebugBatchTask struct {
+	TaskID    string `json:"task_id"`
+	TaskOrder int64  `json:"task_order"`
+	Status    string `json:"status"`
 }
 
 type DebugManifestPath struct {
@@ -273,7 +279,7 @@ type DebugAffected struct {
 	SessionIDs []string `json:"session_ids"`
 	BatchIDs   []string `json:"batch_ids"`
 	TaskIDs    []string `json:"task_ids"`
-	Workers    []string `json:"worker_identities"`
+	Agents     []string `json:"agent_identities"`
 	Paths      []string `json:"paths"`
 }
 
@@ -315,7 +321,7 @@ func (p *Project) collectDebug(options DebugOptions) DebugSnapshot {
 		Locations:       DebugLocations{ProjectRoot: p.Root, GitDir: p.GitDir, StatePath: filepath.Join(p.GitDir, "bandmaster", "state.db"), ConfigPath: filepath.Join(p.Root, ".bandmaster.yaml")},
 		Repository:      DebugRepository{Root: p.Root, ChangedPaths: []string{}},
 		State:           DebugState{Initialization: "uninitialized"},
-		Tasks:           []DebugTask{}, Workers: []DebugWorker{}, Batches: []DebugBatch{}, Monitors: []DebugMonitor{}, Integrity: []DebugIntegrity{}, Events: []DebugEvent{}, Diagnostics: []DebugDiagnostic{},
+		Tasks:           []DebugTask{}, Agents: []DebugAgent{}, Batches: []DebugBatch{}, Monitors: []DebugMonitor{}, Integrity: []DebugIntegrity{}, Events: []DebugEvent{}, Diagnostics: []DebugDiagnostic{},
 	}
 	snapshot.Revision.GitBefore = p.gitRevision()
 	if options.CachedRepository != nil && !options.ForceGit && options.LastGitRevision == snapshot.Revision.GitBefore {
@@ -413,7 +419,7 @@ func newDebugDatabaseSnapshot(snapshot DebugSnapshot) DebugSnapshot {
 			Present: snapshot.Configuration.Present,
 			Digest:  snapshot.Configuration.Digest,
 		},
-		Tasks: []DebugTask{}, Workers: []DebugWorker{}, Batches: []DebugBatch{}, Monitors: []DebugMonitor{}, Integrity: []DebugIntegrity{}, Events: []DebugEvent{}, Diagnostics: []DebugDiagnostic{},
+		Tasks: []DebugTask{}, Agents: []DebugAgent{}, Batches: []DebugBatch{}, Monitors: []DebugMonitor{}, Integrity: []DebugIntegrity{}, Events: []DebugEvent{}, Diagnostics: []DebugDiagnostic{},
 	}
 }
 
@@ -423,12 +429,12 @@ func debugDatabaseRevision(snapshot DebugSnapshot) int64 {
 		Configuration DebugConfiguration
 		Session       *DebugSession
 		Tasks         []DebugTask
-		Workers       []DebugWorker
+		Agents        []DebugAgent
 		Batches       []DebugBatch
 		Monitors      []DebugMonitor
 		Integrity     []DebugIntegrity
 		Events        []DebugEvent
-	}{snapshot.State.SchemaVersion, snapshot.Configuration, snapshot.Session, snapshot.Tasks, snapshot.Workers, snapshot.Batches, snapshot.Monitors, snapshot.Integrity, snapshot.Events}
+	}{snapshot.State.SchemaVersion, snapshot.Configuration, snapshot.Session, snapshot.Tasks, snapshot.Agents, snapshot.Batches, snapshot.Monitors, snapshot.Integrity, snapshot.Events}
 	encoded, _ := json.Marshal(payload)
 	digest := sha256.Sum256(encoded)
 	return int64(binary.BigEndian.Uint64(digest[:8]) & uint64(^uint64(0)>>1))
@@ -439,7 +445,7 @@ func applyVerifiedDebugDatabase(snapshot *DebugSnapshot, verification DebugSnaps
 	snapshot.Configuration = verification.Configuration
 	snapshot.Session = verification.Session
 	snapshot.Tasks = verification.Tasks
-	snapshot.Workers = verification.Workers
+	snapshot.Agents = verification.Agents
 	snapshot.Batches = verification.Batches
 	snapshot.Monitors = verification.Monitors
 	snapshot.Integrity = verification.Integrity
@@ -591,7 +597,7 @@ func (p *Project) collectDebugDatabase(tx *sql.Tx, options DebugOptions, snapsho
 	collectMonitors(tx, snapshot)
 	collectIntegrity(tx, snapshot)
 	collectEvents(tx, options, snapshot)
-	deriveWorkers(snapshot)
+	deriveAgents(snapshot)
 }
 
 func collectSession(tx *sql.Tx, selected string, snapshot *DebugSnapshot) error {

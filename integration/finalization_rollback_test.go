@@ -25,7 +25,7 @@ func TestCommitBatchRollbackPreservesMixedPathStatesWithCleanIndex(t *testing.T)
 
 	started := successfulSessionCommand(t, repo, "start")
 	task := successfulTaskCommand(t, repo, "create", "--title", "Preserve mixed edits", "--intent", "Exercise transactional rollback", "--expected-outcome", "Every edit survives unstaged")
-	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "rollback-worker")
+	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "rollback-agent")
 	paths := []string{"owned.txt", "created.txt", "deleted.txt", "rename-source.txt", "rename-destination.txt", "linked", "executable.sh", "hook-edit.txt"}
 	for _, path := range paths {
 		successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", path)
@@ -106,7 +106,7 @@ func TestCommitBatchRollbackFailureReportsInitiatingAndRecoveryErrors(t *testing
 	repo := repositoryWithValidation(t, "")
 	successfulSessionCommand(t, repo, "start")
 	task := successfulTaskCommand(t, repo, "create", "--title", "Expose rollback cause", "--intent", "Retain the complete failure chain", "--expected-outcome", "Structured causal errors")
-	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "rollback-failure-worker")
+	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "rollback-failure-agent")
 	successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "owned.txt")
 	writeFile(t, filepath.Join(repo, "owned.txt"), "submitted\n")
 	submitBatchTask(t, repo, task.Result.ID, assignment.Result.AssignmentToken)

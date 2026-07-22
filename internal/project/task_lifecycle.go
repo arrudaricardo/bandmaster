@@ -8,9 +8,9 @@ import (
 	"time"
 )
 
-func (p *Project) AssignTask(id, workerIdentity string) (Task, *Error) {
-	if strings.TrimSpace(workerIdentity) == "" {
-		return Task{}, invalid("invalid_worker_identity", "Worker identity must not be empty.")
+func (p *Project) AssignTask(id, agentIdentity string) (Task, *Error) {
+	if strings.TrimSpace(agentIdentity) == "" {
+		return Task{}, invalid("invalid_agent_identity", "Agent identity must not be empty.")
 	}
 	db, projectError := p.openState()
 	if projectError != nil {
@@ -30,19 +30,19 @@ func (p *Project) AssignTask(id, workerIdentity string) (Task, *Error) {
 		return Task{}, projectError
 	}
 	var status string
-	var currentWorker, currentToken sql.NullString
-	if err := tx.QueryRow(`SELECT status, worker_identity, assignment_token FROM tasks WHERE session_id = ? AND id = ?`, session.ID, id).Scan(&status, &currentWorker, &currentToken); errors.Is(err, sql.ErrNoRows) {
+	var currentAgent, currentToken sql.NullString
+	if err := tx.QueryRow(`SELECT status, agent_identity, assignment_token FROM tasks WHERE session_id = ? AND id = ?`, session.ID, id).Scan(&status, &currentAgent, &currentToken); errors.Is(err, sql.ErrNoRows) {
 		return Task{}, invalidSession(session.ID, "task_not_found", fmt.Sprintf("Task %s does not exist in the active session.", id))
 	} else if err != nil {
 		return Task{}, sessionInternal(session.ID, "read task assignment", err)
 	}
 	if status == "quarantined" {
 		if err := tx.Commit(); err != nil {
-			return Task{}, sessionInternal(session.ID, "commit worker lease expiry", err)
+			return Task{}, sessionInternal(session.ID, "commit agent lease expiry", err)
 		}
-		return Task{}, quarantined(session.ID, "lease_expired", fmt.Sprintf("The worker lease for task %s expired and its ownership is quarantined.", id))
+		return Task{}, quarantined(session.ID, "lease_expired", fmt.Sprintf("The agent lease for task %s expired and its ownership is quarantined.", id))
 	}
-	leaseDuration, configDigest, projectError := p.workerLeaseConfiguration()
+	leaseDuration, configDigest, projectError := p.agentLeaseConfiguration()
 	if projectError != nil {
 		projectError.SessionID = session.ID
 		return Task{}, projectError
@@ -55,7 +55,7 @@ func (p *Project) AssignTask(id, workerIdentity string) (Task, *Error) {
 	if err != nil || approvedDigest != configDigest {
 		return Task{}, invalidSession(session.ID, "configuration_not_approved", fmt.Sprintf("Validation configuration %s is not approved.", configDigest))
 	}
-	if (status == "assigned" || status == "editing") && currentWorker.String == workerIdentity && currentToken.String != "" {
+	if (status == "assigned" || status == "editing") && currentAgent.String == agentIdentity && currentToken.String != "" {
 		if err := tx.Rollback(); err != nil {
 			return Task{}, sessionInternal(session.ID, "close idempotent task assignment", err)
 		}
@@ -88,7 +88,7 @@ func (p *Project) AssignTask(id, workerIdentity string) (Task, *Error) {
 		var repairBatchID string
 		err := tx.QueryRow(`SELECT id FROM batches WHERE session_id = ? AND status IN ('repair_pending', 'repairing') ORDER BY creation_order LIMIT 1`, session.ID).Scan(&repairBatchID)
 		if err == nil {
-			return Task{}, blocked(session.ID, "batch_repair_in_progress", fmt.Sprintf("Batch %s must complete repair before unrelated workers can be assigned.", repairBatchID))
+			return Task{}, blocked(session.ID, "batch_repair_in_progress", fmt.Sprintf("Batch %s must complete repair before unrelated agents can be assigned.", repairBatchID))
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return Task{}, sessionInternal(session.ID, "inspect batch repair before assignment", err)
@@ -99,12 +99,12 @@ func (p *Project) AssignTask(id, workerIdentity string) (Task, *Error) {
 	}
 	toStatus := "assigned"
 	if status == "repair_pending" {
-		var batchMembershipCount int
-		if err := tx.QueryRow(`SELECT COUNT(*) FROM batch_members WHERE task_id = ?`, id).Scan(&batchMembershipCount); err != nil {
+		var batchTaskCount int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM batch_tasks WHERE task_id = ?`, id).Scan(&batchTaskCount); err != nil {
 			return Task{}, sessionInternal(session.ID, "inspect retained replacement ownership", err)
 		}
-		if batchMembershipCount == 0 {
-			return Task{}, sessionInternal(session.ID, "assign replacement worker", errors.New("repair-pending task has no retained batch membership"))
+		if batchTaskCount == 0 {
+			return Task{}, sessionInternal(session.ID, "assign replacement Agent", errors.New("repair-pending Task has no retained Batch Task record"))
 		}
 		if projectError := validateTaskBatchStatus(tx, session.ID, id, "collecting", "repairing"); projectError != nil {
 			return Task{}, projectError
@@ -117,11 +117,11 @@ func (p *Project) AssignTask(id, workerIdentity string) (Task, *Error) {
 	}
 	nowTime := time.Now().UTC()
 	now := nowTime.Format(time.RFC3339Nano)
-	if _, err := tx.Exec(`UPDATE tasks SET status = ?, worker_identity = ?, assignment_token = ?, updated_at = ? WHERE id = ? AND status = ?`, toStatus, workerIdentity, token, now, id, status); err != nil {
+	if _, err := tx.Exec(`UPDATE tasks SET status = ?, agent_identity = ?, assignment_token = ?, updated_at = ? WHERE id = ? AND status = ?`, toStatus, agentIdentity, token, now, id, status); err != nil {
 		return Task{}, sessionInternal(session.ID, "assign task", err)
 	}
 	if _, err := tx.Exec(`INSERT INTO task_leases(task_id, status, duration_nanos, renewed_at, expires_at) VALUES(?, 'active', ?, ?, ?) ON CONFLICT(task_id) DO UPDATE SET status = 'active', duration_nanos = excluded.duration_nanos, renewed_at = excluded.renewed_at, expires_at = excluded.expires_at`, id, leaseDuration.Nanoseconds(), now, nowTime.Add(leaseDuration).Format(time.RFC3339Nano)); err != nil {
-		return Task{}, sessionInternal(session.ID, "create worker lease", err)
+		return Task{}, sessionInternal(session.ID, "create agent lease", err)
 	}
 	if status == "repair_pending" {
 		if _, err := tx.Exec(`
@@ -141,7 +141,7 @@ func (p *Project) AssignTask(id, workerIdentity string) (Task, *Error) {
 			return Task{}, sessionInternal(session.ID, "link replacement token to repair", err)
 		}
 	}
-	if _, err := tx.Exec(`INSERT INTO task_audit_events(session_id, task_id, event, from_status, to_status, worker_identity, occurred_at) VALUES(?, ?, 'task_assigned', ?, ?, ?, ?)`, session.ID, id, status, toStatus, workerIdentity, now); err != nil {
+	if _, err := tx.Exec(`INSERT INTO task_audit_events(session_id, task_id, event, from_status, to_status, agent_identity, occurred_at) VALUES(?, ?, 'task_assigned', ?, ?, ?, ?)`, session.ID, id, status, toStatus, agentIdentity, now); err != nil {
 		return Task{}, sessionInternal(session.ID, "record task assignment", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -179,7 +179,7 @@ func (p *Project) RequeueTask(id string) (Task, *Error) {
 		return Task{}, sessionInternal(session.ID, "requeue blocked task", fmt.Errorf("blocked task retained %d claims", claimCount))
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := tx.Exec(`UPDATE tasks SET status = 'ready', worker_identity = NULL, assignment_token = NULL, updated_at = ? WHERE id = ? AND status = 'blocked'`, now, id); err != nil {
+	if _, err := tx.Exec(`UPDATE tasks SET status = 'ready', agent_identity = NULL, assignment_token = NULL, updated_at = ? WHERE id = ? AND status = 'blocked'`, now, id); err != nil {
 		return Task{}, sessionInternal(session.ID, "requeue blocked task", err)
 	}
 	if _, err := tx.Exec(`INSERT INTO task_audit_events(session_id, task_id, event, from_status, to_status, occurred_at) VALUES(?, ?, 'task_requeued', 'blocked', 'ready', ?)`, session.ID, id, now); err != nil {
@@ -192,8 +192,8 @@ func (p *Project) RequeueTask(id string) (Task, *Error) {
 }
 
 func (p *Project) RecoverTask(id string, request RepairRequest) (Task, *Error) {
-	if strings.TrimSpace(request.UserConfirmation) != "" && (strings.TrimSpace(request.TerminatedWorker) != "" || strings.TrimSpace(request.TerminationProof) != "") {
-		return Task{}, invalid("conflicting_recovery_evidence", "Use either worker-handle termination evidence or explicit user confirmation, not both.")
+	if strings.TrimSpace(request.UserConfirmation) != "" && (strings.TrimSpace(request.TerminatedAgent) != "" || strings.TrimSpace(request.TerminationProof) != "") {
+		return Task{}, invalid("conflicting_recovery_evidence", "Use either agent-handle termination evidence or explicit user confirmation, not both.")
 	}
 	db, projectError := p.openState()
 	if projectError != nil {
@@ -213,9 +213,9 @@ func (p *Project) RecoverTask(id string, request RepairRequest) (Task, *Error) {
 		return Task{}, projectError
 	}
 	var status string
-	var workerIdentity sql.NullString
-	var batchMembershipCount int
-	if err := tx.QueryRow(`SELECT status, worker_identity, (SELECT COUNT(*) FROM batch_members WHERE task_id = tasks.id) FROM tasks WHERE session_id = ? AND id = ?`, session.ID, id).Scan(&status, &workerIdentity, &batchMembershipCount); errors.Is(err, sql.ErrNoRows) {
+	var agentIdentity sql.NullString
+	var batchTaskCount int
+	if err := tx.QueryRow(`SELECT status, agent_identity, (SELECT COUNT(*) FROM batch_tasks WHERE task_id = tasks.id) FROM tasks WHERE session_id = ? AND id = ?`, session.ID, id).Scan(&status, &agentIdentity, &batchTaskCount); errors.Is(err, sql.ErrNoRows) {
 		return Task{}, invalidSession(session.ID, "task_not_found", fmt.Sprintf("Task %s does not exist in the active session.", id))
 	} else if err != nil {
 		return Task{}, sessionInternal(session.ID, "read quarantined task", err)
@@ -223,19 +223,19 @@ func (p *Project) RecoverTask(id string, request RepairRequest) (Task, *Error) {
 	if status != "quarantined" {
 		return Task{}, invalidSession(session.ID, "task_not_recoverable", fmt.Sprintf("Task %s cannot be recovered from %s state.", id, status))
 	}
-	recoveryMethod := "worker_handle"
+	recoveryMethod := "agent_handle"
 	if strings.TrimSpace(request.UserConfirmation) != "" {
 		recoveryMethod = "user_confirmation"
-	} else if request.TerminatedWorker == "" {
-		return Task{}, invalidSession(session.ID, "worker_termination_required", fmt.Sprintf("Recovering quarantined task %s requires the terminated worker identity %s or explicit user confirmation.", id, workerIdentity.String))
-	} else if request.TerminatedWorker != workerIdentity.String {
-		return Task{}, invalidSession(session.ID, "worker_termination_mismatch", fmt.Sprintf("Task %s is assigned to worker %s, not %s.", id, workerIdentity.String, request.TerminatedWorker))
+	} else if request.TerminatedAgent == "" {
+		return Task{}, invalidSession(session.ID, "agent_termination_required", fmt.Sprintf("Recovering quarantined task %s requires the terminated agent identity %s or explicit user confirmation.", id, agentIdentity.String))
+	} else if request.TerminatedAgent != agentIdentity.String {
+		return Task{}, invalidSession(session.ID, "agent_termination_mismatch", fmt.Sprintf("Task %s is assigned to agent %s, not %s.", id, agentIdentity.String, request.TerminatedAgent))
 	} else if strings.TrimSpace(request.TerminationProof) == "" {
-		return Task{}, invalidSession(session.ID, "worker_termination_proof_required", fmt.Sprintf("Recovering quarantined task %s requires evidence from the parent-held worker handle that %s stopped.", id, workerIdentity.String))
+		return Task{}, invalidSession(session.ID, "agent_termination_proof_required", fmt.Sprintf("Recovering quarantined task %s requires evidence from the parent-held agent handle that %s stopped.", id, agentIdentity.String))
 	}
 	toStatus := "ready"
 	var repairSnapshots []capturedSnapshot
-	if batchMembershipCount != 0 {
+	if batchTaskCount != 0 {
 		if strings.TrimSpace(request.Diagnosis) == "" || strings.TrimSpace(request.IntendedRepair) == "" {
 			return Task{}, invalidSession(session.ID, "invalid_repair_handoff", "Recovering claimed work requires a non-empty diagnosis and intended repair.")
 		}
@@ -260,10 +260,10 @@ func (p *Project) RecoverTask(id string, request RepairRequest) (Task, *Error) {
 		toStatus = "repair_pending"
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := tx.Exec(`UPDATE tasks SET status = ?, worker_identity = NULL, assignment_token = NULL, updated_at = ? WHERE id = ? AND status = 'quarantined'`, toStatus, now, id); err != nil {
+	if _, err := tx.Exec(`UPDATE tasks SET status = ?, agent_identity = NULL, assignment_token = NULL, updated_at = ? WHERE id = ? AND status = 'quarantined'`, toStatus, now, id); err != nil {
 		return Task{}, sessionInternal(session.ID, "recover quarantined task", err)
 	}
-	auditResult, err := tx.Exec(`INSERT INTO task_audit_events(session_id, task_id, event, from_status, to_status, worker_identity, termination_proof, occurred_at) VALUES(?, ?, 'task_recovered', 'quarantined', ?, ?, ?, ?)`, session.ID, id, toStatus, workerIdentity.String, nullableString(request.TerminationProof), now)
+	auditResult, err := tx.Exec(`INSERT INTO task_audit_events(session_id, task_id, event, from_status, to_status, agent_identity, termination_proof, occurred_at) VALUES(?, ?, 'task_recovered', 'quarantined', ?, ?, ?, ?)`, session.ID, id, toStatus, agentIdentity.String, nullableString(request.TerminationProof), now)
 	if err != nil {
 		return Task{}, sessionInternal(session.ID, "record task recovery", err)
 	}
@@ -274,7 +274,7 @@ func (p *Project) RecoverTask(id string, request RepairRequest) (Task, *Error) {
 	if _, err := tx.Exec(`INSERT INTO task_recovery_events(task_audit_sequence, recovery_method, user_confirmation) VALUES(?, ?, ?)`, auditSequence, recoveryMethod, nullableString(request.UserConfirmation)); err != nil {
 		return Task{}, sessionInternal(session.ID, "record task recovery evidence", err)
 	}
-	if batchMembershipCount != 0 {
+	if batchTaskCount != 0 {
 		if projectError := persistTaskRepairDetails(tx, session.ID, id, auditSequence, request, recoveryMethod, nil, repairSnapshots, nil); projectError != nil {
 			return Task{}, projectError
 		}
@@ -285,7 +285,7 @@ func (p *Project) RecoverTask(id string, request RepairRequest) (Task, *Error) {
 	return inspectTask(db, session.ID, id)
 }
 
-func (p *Project) ReplanTask(id string, plan TaskPlan, terminatedWorker, terminationProof string) (Task, *Error) {
+func (p *Project) ReplanTask(id string, plan TaskPlan, terminatedAgent, terminationProof string) (Task, *Error) {
 	if projectError := validateTaskPlan(plan); projectError != nil {
 		return Task{}, projectError
 	}
@@ -304,9 +304,9 @@ func (p *Project) ReplanTask(id string, plan TaskPlan, terminatedWorker, termina
 		return Task{}, projectError
 	}
 	var status string
-	var workerIdentity sql.NullString
+	var agentIdentity sql.NullString
 	var coreFrozen int
-	if err := tx.QueryRow(`SELECT status, worker_identity, core_frozen FROM tasks WHERE session_id = ? AND id = ?`, session.ID, id).Scan(&status, &workerIdentity, &coreFrozen); errors.Is(err, sql.ErrNoRows) {
+	if err := tx.QueryRow(`SELECT status, agent_identity, core_frozen FROM tasks WHERE session_id = ? AND id = ?`, session.ID, id).Scan(&status, &agentIdentity, &coreFrozen); errors.Is(err, sql.ErrNoRows) {
 		return Task{}, invalidSession(session.ID, "task_not_found", fmt.Sprintf("Task %s does not exist in the active session.", id))
 	} else if err != nil {
 		return Task{}, sessionInternal(session.ID, "read task plan", err)
@@ -317,7 +317,7 @@ func (p *Project) ReplanTask(id string, plan TaskPlan, terminatedWorker, termina
 	if status != "planned" && status != "ready" && status != "blocked" && status != "assigned" {
 		return Task{}, invalidSession(session.ID, "task_not_replannable", fmt.Sprintf("Task %s cannot be replanned from %s state.", id, status))
 	}
-	if projectError := validateWorkerTermination(session.ID, id, status, workerIdentity.String, terminatedWorker, terminationProof, "Replanning"); projectError != nil {
+	if projectError := validateAgentTermination(session.ID, id, status, agentIdentity.String, terminatedAgent, terminationProof, "Replanning"); projectError != nil {
 		return Task{}, projectError
 	}
 	if projectError := validatePrerequisites(tx, session.ID, id, plan.Prerequisites); projectError != nil {
@@ -333,12 +333,12 @@ func (p *Project) ReplanTask(id string, plan TaskPlan, terminatedWorker, termina
 		return Task{}, projectError
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := tx.Exec(`UPDATE tasks SET title = ?, intent = ?, expected_outcome = ?, status = ?, worker_identity = NULL, assignment_token = NULL, updated_at = ? WHERE id = ?`, plan.Title, plan.Intent, plan.ExpectedOutcome, newStatus, now, id); err != nil {
+	if _, err := tx.Exec(`UPDATE tasks SET title = ?, intent = ?, expected_outcome = ?, status = ?, agent_identity = NULL, assignment_token = NULL, updated_at = ? WHERE id = ?`, plan.Title, plan.Intent, plan.ExpectedOutcome, newStatus, now, id); err != nil {
 		return Task{}, sessionInternal(session.ID, "update task plan", err)
 	}
 	if status == "assigned" {
 		if _, err := tx.Exec(`UPDATE task_leases SET status = 'closed' WHERE task_id = ?`, id); err != nil {
-			return Task{}, sessionInternal(session.ID, "close replanned worker lease", err)
+			return Task{}, sessionInternal(session.ID, "close replanned agent lease", err)
 		}
 	}
 	if _, err := tx.Exec(`DELETE FROM task_dependencies WHERE task_id = ?`, id); err != nil {
@@ -349,13 +349,13 @@ func (p *Project) ReplanTask(id string, plan TaskPlan, terminatedWorker, termina
 			return Task{}, sessionInternal(session.ID, "record replanned task prerequisite", err)
 		}
 	}
-	var auditWorker any
+	var auditAgent any
 	var auditTerminationProof any
 	if status == "assigned" {
-		auditWorker = workerIdentity.String
+		auditAgent = agentIdentity.String
 		auditTerminationProof = terminationProof
 	}
-	if _, err := tx.Exec(`INSERT INTO task_audit_events(session_id, task_id, event, from_status, to_status, worker_identity, termination_proof, occurred_at) VALUES(?, ?, 'task_replanned', ?, ?, ?, ?, ?)`, session.ID, id, status, newStatus, auditWorker, auditTerminationProof, now); err != nil {
+	if _, err := tx.Exec(`INSERT INTO task_audit_events(session_id, task_id, event, from_status, to_status, agent_identity, termination_proof, occurred_at) VALUES(?, ?, 'task_replanned', ?, ?, ?, ?, ?)`, session.ID, id, status, newStatus, auditAgent, auditTerminationProof, now); err != nil {
 		return Task{}, sessionInternal(session.ID, "record task replanning", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -364,7 +364,7 @@ func (p *Project) ReplanTask(id string, plan TaskPlan, terminatedWorker, termina
 	return inspectTask(db, session.ID, id)
 }
 
-func (p *Project) CancelTask(id, terminatedWorker, terminationProof string) (Task, *Error) {
+func (p *Project) CancelTask(id, terminatedAgent, terminationProof string) (Task, *Error) {
 	db, projectError := p.openState()
 	if projectError != nil {
 		return Task{}, projectError
@@ -380,9 +380,9 @@ func (p *Project) CancelTask(id, terminatedWorker, terminationProof string) (Tas
 		return Task{}, projectError
 	}
 	var status string
-	var workerIdentity sql.NullString
+	var agentIdentity sql.NullString
 	var coreFrozen int
-	if err := tx.QueryRow(`SELECT status, worker_identity, core_frozen FROM tasks WHERE session_id = ? AND id = ?`, session.ID, id).Scan(&status, &workerIdentity, &coreFrozen); errors.Is(err, sql.ErrNoRows) {
+	if err := tx.QueryRow(`SELECT status, agent_identity, core_frozen FROM tasks WHERE session_id = ? AND id = ?`, session.ID, id).Scan(&status, &agentIdentity, &coreFrozen); errors.Is(err, sql.ErrNoRows) {
 		return Task{}, invalidSession(session.ID, "task_not_found", fmt.Sprintf("Task %s does not exist in the active session.", id))
 	} else if err != nil {
 		return Task{}, sessionInternal(session.ID, "read task cancellation state", err)
@@ -410,25 +410,25 @@ func (p *Project) CancelTask(id, terminatedWorker, terminationProof string) (Tas
 	if !errors.Is(err, sql.ErrNoRows) {
 		return Task{}, sessionInternal(session.ID, "inspect task dependents", err)
 	}
-	if projectError := validateWorkerTermination(session.ID, id, status, workerIdentity.String, terminatedWorker, terminationProof, "Canceling"); projectError != nil {
+	if projectError := validateAgentTermination(session.ID, id, status, agentIdentity.String, terminatedAgent, terminationProof, "Canceling"); projectError != nil {
 		return Task{}, projectError
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := tx.Exec(`UPDATE tasks SET status = 'canceled', worker_identity = NULL, assignment_token = NULL, updated_at = ? WHERE id = ?`, now, id); err != nil {
+	if _, err := tx.Exec(`UPDATE tasks SET status = 'canceled', agent_identity = NULL, assignment_token = NULL, updated_at = ? WHERE id = ?`, now, id); err != nil {
 		return Task{}, sessionInternal(session.ID, "cancel task", err)
 	}
 	if status == "assigned" {
 		if _, err := tx.Exec(`UPDATE task_leases SET status = 'closed' WHERE task_id = ?`, id); err != nil {
-			return Task{}, sessionInternal(session.ID, "close canceled worker lease", err)
+			return Task{}, sessionInternal(session.ID, "close canceled agent lease", err)
 		}
 	}
-	var auditWorker any
+	var auditAgent any
 	var auditTerminationProof any
 	if status == "assigned" {
-		auditWorker = workerIdentity.String
+		auditAgent = agentIdentity.String
 		auditTerminationProof = terminationProof
 	}
-	if _, err := tx.Exec(`INSERT INTO task_audit_events(session_id, task_id, event, from_status, to_status, worker_identity, termination_proof, occurred_at) VALUES(?, ?, 'task_canceled', ?, 'canceled', ?, ?, ?)`, session.ID, id, status, auditWorker, auditTerminationProof, now); err != nil {
+	if _, err := tx.Exec(`INSERT INTO task_audit_events(session_id, task_id, event, from_status, to_status, agent_identity, termination_proof, occurred_at) VALUES(?, ?, 'task_canceled', ?, 'canceled', ?, ?, ?)`, session.ID, id, status, auditAgent, auditTerminationProof, now); err != nil {
 		return Task{}, sessionInternal(session.ID, "record task cancellation", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -437,18 +437,18 @@ func (p *Project) CancelTask(id, terminatedWorker, terminationProof string) (Tas
 	return inspectTask(db, session.ID, id)
 }
 
-func validateWorkerTermination(sessionID, taskID, status, assignedWorker, terminatedWorker, terminationProof, action string) *Error {
+func validateAgentTermination(sessionID, taskID, status, assignedAgent, terminatedAgent, terminationProof, action string) *Error {
 	if status != "assigned" {
 		return nil
 	}
-	if terminatedWorker == "" {
-		return invalidSession(sessionID, "worker_termination_required", fmt.Sprintf("%s assigned task %s requires the terminated worker identity %s.", action, taskID, assignedWorker))
+	if terminatedAgent == "" {
+		return invalidSession(sessionID, "agent_termination_required", fmt.Sprintf("%s assigned task %s requires the terminated agent identity %s.", action, taskID, assignedAgent))
 	}
-	if terminatedWorker != assignedWorker {
-		return invalidSession(sessionID, "worker_termination_mismatch", fmt.Sprintf("Task %s is assigned to worker %s, not %s.", taskID, assignedWorker, terminatedWorker))
+	if terminatedAgent != assignedAgent {
+		return invalidSession(sessionID, "agent_termination_mismatch", fmt.Sprintf("Task %s is assigned to agent %s, not %s.", taskID, assignedAgent, terminatedAgent))
 	}
 	if strings.TrimSpace(terminationProof) == "" {
-		return invalidSession(sessionID, "worker_termination_proof_required", fmt.Sprintf("%s assigned task %s requires evidence from the parent-held worker handle that %s stopped.", action, taskID, assignedWorker))
+		return invalidSession(sessionID, "agent_termination_proof_required", fmt.Sprintf("%s assigned task %s requires evidence from the parent-held agent handle that %s stopped.", action, taskID, assignedAgent))
 	}
 	return nil
 }

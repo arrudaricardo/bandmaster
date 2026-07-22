@@ -15,7 +15,7 @@ func TestSessionAbortDryRunDoesNotMigrateLegacyOwnershipSchema(t *testing.T) {
 	repo := approvedCleanRepository(t)
 	successfulSessionCommand(t, repo, "start")
 	task := successfulTaskCommand(t, repo, "create", "--title", "Preview legacy abort", "--intent", "Keep schema untouched", "--expected-outcome", "Dry-run is read-only")
-	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "legacy-preview-worker")
+	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "legacy-preview-agent")
 	successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "legacy-preview.txt")
 	successfulSessionCommand(t, repo, "pause")
 
@@ -49,7 +49,7 @@ func TestSessionAbortDryRunDoesNotMigrateLegacyOwnershipSchema(t *testing.T) {
 		t.Fatalf("stat legacy state: %v", err)
 	}
 
-	preview := runBandmaster(t, repo, "session", "abort", "--dry-run", "--termination-confirmation", "legacy worker stopped", "--json")
+	preview := runBandmaster(t, repo, "session", "abort", "--dry-run", "--termination-confirmation", "legacy agent stopped", "--json")
 	if preview.exitCode != 0 {
 		t.Fatalf("preview legacy abort: exit=%d stdout=%s stderr=%s", preview.exitCode, preview.stdout, preview.stderr)
 	}
@@ -88,7 +88,7 @@ func TestExistingClaimBackedSnapshotsMigrateWithoutLosingEvidence(t *testing.T) 
 	runGit(t, repo, "-c", "user.name=Bandmaster Tests", "-c", "user.email=bandmaster@example.invalid", "commit", "-m", "Add legacy fixture")
 	successfulSessionCommand(t, repo, "start")
 	task := successfulTaskCommand(t, repo, "create", "--title", "Migrate ownership", "--intent", "Retain legacy evidence", "--expected-outcome", "Claims become releasable")
-	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-legacy-migration")
+	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "agent-legacy-migration")
 	claimed := successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "legacy.txt")
 	writeFile(t, filepath.Join(repo, "legacy.txt"), "after\n")
 	if reviewed := runBandmaster(t, repo, "task", "diff", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--json"); reviewed.exitCode != 0 {
@@ -146,7 +146,7 @@ func TestExistingClaimBackedSnapshotsMigrateWithoutLosingEvidence(t *testing.T) 
 		t.Fatalf("migration lost baseline, submission, or attribution: %+v", migrated.Result)
 	}
 
-	aborted := runBandmaster(t, repo, "session", "abort", "--termination-confirmation", "legacy worker stopped", "--json")
+	aborted := runBandmaster(t, repo, "session", "abort", "--termination-confirmation", "legacy agent stopped", "--json")
 	if aborted.exitCode != 0 {
 		t.Fatalf("abort migrated submitted task: exit=%d stdout=%s stderr=%s", aborted.exitCode, aborted.stdout, aborted.stderr)
 	}

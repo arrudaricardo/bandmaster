@@ -24,7 +24,7 @@ func TestCommitBatchUsesFrozenManifestForMixedGitPathStates(t *testing.T) {
 
 	started := successfulSessionCommand(t, repo, "start")
 	task := successfulTaskCommand(t, repo, "create", "--title", "Mix path states", "--intent", "Commit exact frozen manifest", "--expected-outcome", "Every Git path state is attributed")
-	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "manifest-worker")
+	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "manifest-agent")
 	paths := []string{"owned.txt", "created.txt", "deleted.txt", "rename-source.txt", "rename-destination.txt", "linked", "executable.sh"}
 	for _, path := range paths {
 		successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", path)
@@ -86,7 +86,7 @@ func TestCommitBatchRejectsPathDriftFromFrozenSubmittedSnapshot(t *testing.T) {
 	repo := repositoryWithValidation(t, "")
 	started := successfulSessionCommand(t, repo, "start")
 	task := successfulTaskCommand(t, repo, "create", "--title", "Freeze exact content", "--intent", "Reject post-validation drift", "--expected-outcome", "No commit is created")
-	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "drift-worker")
+	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "drift-agent")
 	successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "owned.txt")
 	writeFile(t, filepath.Join(repo, "owned.txt"), "submitted\n")
 	submitBatchTask(t, repo, task.Result.ID, assignment.Result.AssignmentToken)

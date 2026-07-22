@@ -4,6 +4,7 @@ go 1.24.0
 
 require (
 	github.com/charmbracelet/bubbletea v1.3.10
+	github.com/creack/pty v1.1.24
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/ncruces/go-sqlite3 v0.17.0
 	github.com/tetratelabs/wazero v1.7.3

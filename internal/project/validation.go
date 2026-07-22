@@ -174,11 +174,11 @@ func (p *Project) ValidateBatch() (Batch, *Error) {
 
 func loadOfficialValidationCommands(db *sql.DB, sessionID, batchID string, config configuration) ([]officialValidationCommand, *Error) {
 	rows, err := db.Query(`
-		SELECT focused.name, focused.argv_json, focused.script, focused.working_directory, focused.timeout, focused.environment_json, member.task_id
-		FROM batch_members member
-		JOIN focused_validations focused ON focused.task_id = member.task_id
-		WHERE member.batch_id = ?
-		ORDER BY member.membership_order, focused.validation_order`, batchID)
+		SELECT focused.name, focused.argv_json, focused.script, focused.working_directory, focused.timeout, focused.environment_json, task.task_id
+		FROM batch_tasks task
+		JOIN focused_validations focused ON focused.task_id = task.task_id
+		WHERE task.batch_id = ?
+		ORDER BY task.task_order, focused.validation_order`, batchID)
 	if err != nil {
 		return nil, sessionInternal(sessionID, "read focused validation plan", err)
 	}

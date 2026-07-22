@@ -90,9 +90,9 @@ func inspectOpenSessionWithQueryer(queryer rowQuerier) (Session, *Error) {
 func inspectTask(db *sql.DB, sessionID, id string) (Task, *Error) {
 	task := Task{SessionID: sessionID}
 	var coreFrozen int
-	var workerIdentity, assignmentToken sql.NullString
-	err := db.QueryRow(`SELECT id, creation_order, title, intent, expected_outcome, status, worker_identity, assignment_token, core_frozen, created_at, updated_at FROM tasks WHERE session_id = ? AND id = ?`, sessionID, id).Scan(
-		&task.ID, &task.CreationOrder, &task.Title, &task.Intent, &task.ExpectedOutcome, &task.Status, &workerIdentity, &assignmentToken, &coreFrozen, &task.CreatedAt, &task.UpdatedAt,
+	var agentIdentity, assignmentToken sql.NullString
+	err := db.QueryRow(`SELECT id, creation_order, title, intent, expected_outcome, status, agent_identity, assignment_token, core_frozen, created_at, updated_at FROM tasks WHERE session_id = ? AND id = ?`, sessionID, id).Scan(
+		&task.ID, &task.CreationOrder, &task.Title, &task.Intent, &task.ExpectedOutcome, &task.Status, &agentIdentity, &assignmentToken, &coreFrozen, &task.CreatedAt, &task.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Task{}, invalidSession(sessionID, "task_not_found", fmt.Sprintf("Task %s does not exist in session %s.", id, sessionID))
@@ -100,7 +100,7 @@ func inspectTask(db *sql.DB, sessionID, id string) (Task, *Error) {
 	if err != nil {
 		return Task{}, sessionInternal(sessionID, "read task", err)
 	}
-	task.WorkerIdentity = workerIdentity.String
+	task.AgentIdentity = agentIdentity.String
 	task.AssignmentToken = assignmentToken.String
 	task.CoreFrozen = coreFrozen != 0
 	task.Claims = []Claim{}
@@ -127,7 +127,7 @@ func inspectTask(db *sql.DB, sessionID, id string) (Task, *Error) {
 	}
 	task.AuditHistory = []TaskAuditEvent{}
 	auditRows, err := db.Query(`
-		SELECT audit.sequence, audit.event, audit.from_status, audit.to_status, audit.worker_identity, audit.termination_proof,
+		SELECT audit.sequence, audit.event, audit.from_status, audit.to_status, audit.agent_identity, audit.termination_proof,
 			COALESCE(recovery.recovery_method, repair.recovery_method),
 			COALESCE(recovery.user_confirmation, repair.user_confirmation),
 			COALESCE(recovery.replacement_assignment_token, repair.replacement_assignment_token),
@@ -141,13 +141,13 @@ func inspectTask(db *sql.DB, sessionID, id string) (Task, *Error) {
 	}
 	for auditRows.Next() {
 		var event TaskAuditEvent
-		var fromStatus, eventWorker, terminationProof, recoveryMethod, userConfirmation, replacementToken, diagnosis, intendedRepair, invalidatedSubmissionJSON sql.NullString
-		if err := auditRows.Scan(&event.Sequence, &event.Event, &fromStatus, &event.ToStatus, &eventWorker, &terminationProof, &recoveryMethod, &userConfirmation, &replacementToken, &diagnosis, &intendedRepair, &invalidatedSubmissionJSON, &event.OccurredAt); err != nil {
+		var fromStatus, eventAgent, terminationProof, recoveryMethod, userConfirmation, replacementToken, diagnosis, intendedRepair, invalidatedSubmissionJSON sql.NullString
+		if err := auditRows.Scan(&event.Sequence, &event.Event, &fromStatus, &event.ToStatus, &eventAgent, &terminationProof, &recoveryMethod, &userConfirmation, &replacementToken, &diagnosis, &intendedRepair, &invalidatedSubmissionJSON, &event.OccurredAt); err != nil {
 			auditRows.Close()
 			return Task{}, sessionInternal(sessionID, "read task audit event", err)
 		}
 		event.FromStatus = fromStatus.String
-		event.WorkerIdentity = eventWorker.String
+		event.AgentIdentity = eventAgent.String
 		event.TerminationProof = terminationProof.String
 		event.RecoveryMethod = recoveryMethod.String
 		event.UserConfirmation = userConfirmation.String
@@ -203,17 +203,17 @@ func inspectTask(db *sql.DB, sessionID, id string) (Task, *Error) {
 			return Task{}, sessionInternal(sessionID, "read task repair snapshots", err)
 		}
 	}
-	if err := db.QueryRow(`SELECT batch_id FROM batch_members WHERE task_id = ?`, id).Scan(&task.BatchID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if err := db.QueryRow(`SELECT batch_id FROM batch_tasks WHERE task_id = ?`, id).Scan(&task.BatchID); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return Task{}, sessionInternal(sessionID, "read task batch", err)
 	}
 	if err := db.QueryRow(`SELECT commit_sha FROM task_commits WHERE task_id = ? ORDER BY committed_at DESC LIMIT 1`, id).Scan(&task.CommitSHA); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return Task{}, sessionInternal(sessionID, "read task commit", err)
 	}
-	var lease WorkerLease
+	var lease AgentLease
 	if err := db.QueryRow(`SELECT status, renewed_at, expires_at FROM task_leases WHERE task_id = ?`, id).Scan(&lease.Status, &lease.RenewedAt, &lease.ExpiresAt); err == nil {
 		task.Lease = &lease
 	} else if !errors.Is(err, sql.ErrNoRows) {
-		return Task{}, sessionInternal(sessionID, "read task worker lease", err)
+		return Task{}, sessionInternal(sessionID, "read task agent lease", err)
 	}
 	claimRows, err := db.Query(`
 		SELECT claim.path, claim.baseline_presence, claim.baseline_type, claim.baseline_content_hash, claim.baseline_executable,

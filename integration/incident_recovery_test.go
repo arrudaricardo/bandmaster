@@ -29,12 +29,12 @@ func TestProductionIncidentRecoversSafelyThroughPublicCLI(t *testing.T) {
 	runGit(t, repo, "commit", "-m", "Add production incident fixtures")
 
 	started := successfulSessionCommand(t, repo, "start")
-	type worker struct {
+	type agent struct {
 		task       taskResponse
 		assignment taskResponse
 		paths      []string
 	}
-	workers := []worker{
+	agents := []agent{
 		{
 			task:  successfulTaskCommand(t, repo, "create", "--title", "Add project core", "--intent", "Create the new modules and modify owned content", "--expected-outcome", "Six exact path changes"),
 			paths: []string{"owned.txt", "new-a.txt", "new-b.txt", "new-c.txt", "new-d.txt", "new-e.txt"},
@@ -48,10 +48,10 @@ func TestProductionIncidentRecoversSafelyThroughPublicCLI(t *testing.T) {
 			paths: []string{"linked"},
 		},
 	}
-	for index := range workers {
-		workers[index].assignment = successfulTaskCommand(t, repo, "assign", workers[index].task.Result.ID, "--worker", "incident-worker-"+string(rune('a'+index)))
-		for _, path := range workers[index].paths {
-			successfulTaskCommand(t, repo, "claim", workers[index].task.Result.ID, "--token", workers[index].assignment.Result.AssignmentToken, "--path", path)
+	for index := range agents {
+		agents[index].assignment = successfulTaskCommand(t, repo, "assign", agents[index].task.Result.ID, "--agent", "incident-agent-"+string(rune('a'+index)))
+		for _, path := range agents[index].paths {
+			successfulTaskCommand(t, repo, "claim", agents[index].task.Result.ID, "--token", agents[index].assignment.Result.AssignmentToken, "--path", path)
 		}
 	}
 
@@ -71,12 +71,12 @@ func TestProductionIncidentRecoversSafelyThroughPublicCLI(t *testing.T) {
 	if err := os.Symlink("owned.txt", filepath.Join(repo, "linked")); err != nil {
 		t.Fatal(err)
 	}
-	for _, current := range workers {
+	for _, current := range agents {
 		submitBatchTask(t, repo, current.task.Result.ID, current.assignment.Result.AssignmentToken)
 	}
 
 	frozen := successfulBatchCommand(t, repo, "freeze")
-	if frozen.Result.Status != "frozen" || len(frozen.Result.Members) != 3 || len(frozen.Result.Manifest) != 10 {
+	if frozen.Result.Status != "frozen" || len(frozen.Result.Tasks) != 3 || len(frozen.Result.Manifest) != 10 {
 		t.Fatalf("incident batch did not freeze every disjoint path: %+v", frozen.Result)
 	}
 	validated := successfulBatchCommand(t, repo, "validate")
@@ -114,7 +114,7 @@ func TestProductionIncidentRecoversSafelyThroughPublicCLI(t *testing.T) {
 
 	beforeDoctorSession := successfulSessionCommand(t, repo, "inspect")
 	beforeDoctorBatch := successfulBatchCommand(t, repo, "inspect")
-	beforeDoctorTask := successfulTaskCommand(t, repo, "inspect", workers[0].task.Result.ID)
+	beforeDoctorTask := successfulTaskCommand(t, repo, "inspect", agents[0].task.Result.ID)
 	beforeDoctorGit := runGit(t, repo, "status", "--porcelain=v1")
 	diagnosis := decodeDoctor(t, runBandmaster(t, repo, "doctor", "--json"))
 	journalEvidence := doctorFinding(t, diagnosis, "contradictory_finalization_journal")
@@ -128,7 +128,7 @@ func TestProductionIncidentRecoversSafelyThroughPublicCLI(t *testing.T) {
 	if after := successfulBatchCommand(t, repo, "inspect"); !reflect.DeepEqual(after.Result, beforeDoctorBatch.Result) {
 		t.Fatalf("doctor mutated batch state:\nbefore=%+v\nafter=%+v", beforeDoctorBatch.Result, after.Result)
 	}
-	if after := successfulTaskCommand(t, repo, "inspect", workers[0].task.Result.ID); !reflect.DeepEqual(after.Result, beforeDoctorTask.Result) {
+	if after := successfulTaskCommand(t, repo, "inspect", agents[0].task.Result.ID); !reflect.DeepEqual(after.Result, beforeDoctorTask.Result) {
 		t.Fatalf("doctor mutated task attribution:\nbefore=%+v\nafter=%+v", beforeDoctorTask.Result, after.Result)
 	}
 	if after := runGit(t, repo, "status", "--porcelain=v1"); after != beforeDoctorGit {
@@ -161,10 +161,10 @@ func TestProductionIncidentRecoversSafelyThroughPublicCLI(t *testing.T) {
 	if err := json.Unmarshal([]byte(preview.stdout), &abortPreview); err != nil {
 		t.Fatalf("decode abort preview: %v", err)
 	}
-	if len(abortPreview.Result.Blockers) != 1 || abortPreview.Result.Blockers[0].Code != "worker_termination_confirmation_required" || len(abortPreview.Result.ActiveClaims) != 10 || len(abortPreview.Result.PreservedArtifacts) == 0 {
+	if len(abortPreview.Result.Blockers) != 1 || abortPreview.Result.Blockers[0].Code != "agent_termination_confirmation_required" || len(abortPreview.Result.ActiveClaims) != 10 || len(abortPreview.Result.PreservedArtifacts) == 0 {
 		t.Fatalf("abort preview did not expose confirmation and preservation plan: %+v", abortPreview.Result)
 	}
-	abortedResult := runBandmaster(t, repo, "session", "abort", "--termination-confirmation", "all incident worker handles and hook process stopped", "--json")
+	abortedResult := runBandmaster(t, repo, "session", "abort", "--termination-confirmation", "all incident agent handles and hook process stopped", "--json")
 	if abortedResult.exitCode != 0 {
 		t.Fatalf("confirmed abort failed: %+v", abortedResult)
 	}
@@ -172,7 +172,7 @@ func TestProductionIncidentRecoversSafelyThroughPublicCLI(t *testing.T) {
 	if aborted.Result.Status != "aborted" {
 		t.Fatalf("incident session did not terminate: %+v", aborted.Result)
 	}
-	for _, current := range workers {
+	for _, current := range agents {
 		inspected := successfulTaskCommand(t, repo, "inspect", current.task.Result.ID)
 		if inspected.Result.Status != "quarantined" || len(inspected.Result.Claims) != 0 || len(inspected.Result.OwnershipEvidence) != len(current.paths) || inspected.Result.Submission == nil {
 			t.Fatalf("abort lost immutable attribution for %s: %+v", current.task.Result.ID, inspected.Result)

@@ -40,7 +40,7 @@ func approvalGuidance(digest string) string {
 
 func writeTask(output io.Writer, jsonOutput bool, command string, task project.Task) int {
 	if jsonOutput {
-		return writeJSON(output, envelope{SchemaVersion: "1", Command: command, Success: true, SessionID: task.SessionID, Result: task})
+		return writeJSON(output, envelope{SchemaVersion: "2", Command: command, Success: true, SessionID: task.SessionID, Result: task})
 	}
 	prerequisites := "none"
 	if len(task.Prerequisites) > 0 {
@@ -51,7 +51,7 @@ func writeTask(output io.Writer, jsonOutput bool, command string, task project.T
 
 func writeSession(output io.Writer, jsonOutput bool, command string, session project.Session) int {
 	if jsonOutput {
-		return writeJSON(output, envelope{SchemaVersion: "1", Command: command, Success: true, SessionID: session.ID, Result: session})
+		return writeJSON(output, envelope{SchemaVersion: "2", Command: command, Success: true, SessionID: session.ID, Result: session})
 	}
 	message := fmt.Sprintf("Session %s is %s.\nStarting branch: %s\nStarting commit: %s\n", session.ID, session.Status, session.StartingBranch, session.StartingCommit)
 	if command == "session inspect" {
@@ -65,15 +65,15 @@ func writeSession(output io.Writer, jsonOutput bool, command string, session pro
 
 func writeBatch(output io.Writer, jsonOutput bool, command string, batch project.Batch) int {
 	if jsonOutput {
-		return writeJSON(output, envelope{SchemaVersion: "1", Command: command, Success: true, SessionID: batch.SessionID, Result: batch})
+		return writeJSON(output, envelope{SchemaVersion: "2", Command: command, Success: true, SessionID: batch.SessionID, Result: batch})
 	}
-	return writeHuman(output, "Batch %s is %s.\nMembers: %d\nManifest paths: %d\n", batch.ID, batch.Status, len(batch.Members), len(batch.Manifest))
+	return writeHuman(output, "Batch %s is %s.\nTasks: %d\nManifest paths: %d\n", batch.ID, batch.Status, len(batch.Tasks), len(batch.Manifest))
 }
 
 func writeProjectError(stdout, stderr io.Writer, jsonOutput bool, command string, err *project.Error) int {
 	if jsonOutput {
 		returnCode := writeJSON(stdout, envelope{
-			SchemaVersion: "1",
+			SchemaVersion: "2",
 			Command:       command,
 			Success:       false,
 			SessionID:     err.SessionID,
@@ -100,7 +100,7 @@ func writeError(stdout, stderr io.Writer, jsonOutput bool, command, code, messag
 func writeErrorWithSession(stdout, stderr io.Writer, jsonOutput bool, command, sessionID, code, message string, retryable bool, exitCode int) int {
 	if jsonOutput {
 		returnCode := writeJSON(stdout, envelope{
-			SchemaVersion: "1",
+			SchemaVersion: "2",
 			Command:       command,
 			Success:       false,
 			SessionID:     sessionID,

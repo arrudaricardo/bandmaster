@@ -16,7 +16,7 @@ type Batch struct {
 	BaseCommit    string                   `json:"base_commit"`
 	Status        string                   `json:"status"`
 	FrozenAt      string                   `json:"frozen_at,omitempty"`
-	Members       []BatchMember            `json:"members"`
+	Tasks         []BatchTask              `json:"tasks"`
 	Manifest      []BatchPath              `json:"manifest"`
 	Validation    []BatchValidationAttempt `json:"validation"`
 	AuditHistory  []BatchAuditEvent        `json:"audit_history"`
@@ -24,21 +24,21 @@ type Batch struct {
 	UpdatedAt     string                   `json:"updated_at"`
 }
 
-type BatchMember struct {
-	TaskID          string `json:"task_id"`
-	MembershipOrder int64  `json:"membership_order"`
-	TaskOrder       int64  `json:"task_creation_order"`
-	Status          string `json:"status"`
-	Outcome         string `json:"submission_outcome,omitempty"`
+type BatchTask struct {
+	TaskID        string `json:"task_id"`
+	TaskOrder     int64  `json:"task_order"`
+	CreationOrder int64  `json:"creation_order"`
+	Status        string `json:"status"`
+	Outcome       string `json:"submission_outcome,omitempty"`
 }
 
 type BatchPath struct {
-	TaskID          string       `json:"task_id"`
-	MembershipOrder int64        `json:"membership_order"`
-	ClaimOrder      int64        `json:"claim_order"`
-	Path            string       `json:"path"`
-	Baseline        PathSnapshot `json:"baseline"`
-	Submitted       PathSnapshot `json:"submitted"`
+	TaskID     string       `json:"task_id"`
+	TaskOrder  int64        `json:"task_order"`
+	ClaimOrder int64        `json:"claim_order"`
+	Path       string       `json:"path"`
+	Baseline   PathSnapshot `json:"baseline"`
+	Submitted  PathSnapshot `json:"submitted"`
 }
 
 type BatchAuditEvent struct {
@@ -135,27 +135,27 @@ func (p *Project) FreezeBatch() (Batch, *Error) {
 	var activeTask string
 	err = tx.QueryRow(`SELECT id FROM tasks WHERE session_id = ? AND status IN ('assigned', 'editing') ORDER BY creation_order LIMIT 1`, session.ID).Scan(&activeTask)
 	if err == nil {
-		return Batch{}, commitBatchCheck(tx, session.ID, blocked(session.ID, "active_workers", fmt.Sprintf("Task %s still has an active worker; every worker must stop before the barrier.", activeTask)))
+		return Batch{}, commitBatchCheck(tx, session.ID, blocked(session.ID, "active_agents", fmt.Sprintf("Task %s still has an active agent; every agent must stop before the barrier.", activeTask)))
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		return Batch{}, sessionInternal(session.ID, "inspect active workers at barrier", err)
+		return Batch{}, sessionInternal(session.ID, "inspect active agents at barrier", err)
 	}
 
-	var memberCount int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM batch_members WHERE batch_id = ?`, batchID).Scan(&memberCount); err != nil {
-		return Batch{}, sessionInternal(session.ID, "count batch members", err)
+	var taskCount int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM batch_tasks WHERE batch_id = ?`, batchID).Scan(&taskCount); err != nil {
+		return Batch{}, sessionInternal(session.ID, "count batch tasks", err)
 	}
-	if memberCount == 0 {
+	if taskCount == 0 {
 		return Batch{}, commitBatchCheck(tx, session.ID, blocked(session.ID, "batch_empty", "A batch must have at least one claimed task before it can freeze."))
 	}
 	var unsubmittedTask string
 	err = tx.QueryRow(`
 		SELECT task.id
-		FROM batch_members member JOIN tasks task ON task.id = member.task_id
-		WHERE member.batch_id = ? AND task.status != 'submitted'
-		ORDER BY member.membership_order LIMIT 1`, batchID).Scan(&unsubmittedTask)
+		FROM batch_tasks batch_task JOIN tasks task ON task.id = batch_task.task_id
+		WHERE batch_task.batch_id = ? AND task.status != 'submitted'
+		ORDER BY batch_task.task_order LIMIT 1`, batchID).Scan(&unsubmittedTask)
 	if err == nil {
-		return Batch{}, commitBatchCheck(tx, session.ID, blocked(session.ID, "batch_member_not_submitted", fmt.Sprintf("Batch member %s has not submitted its work.", unsubmittedTask)))
+		return Batch{}, commitBatchCheck(tx, session.ID, blocked(session.ID, "batch_task_not_submitted", fmt.Sprintf("Batch task %s has not submitted its work.", unsubmittedTask)))
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return Batch{}, sessionInternal(session.ID, "inspect batch submissions", err)
@@ -169,7 +169,7 @@ func (p *Project) FreezeBatch() (Batch, *Error) {
 		WHERE claim.batch_id = ? AND snapshot.task_id IS NULL
 		ORDER BY claim.task_id, claim.claim_order LIMIT 1`, batchID).Scan(&missingSnapshotTask, &missingSnapshotPath)
 	if err == nil {
-		return Batch{}, commitBatchCheck(tx, session.ID, blocked(session.ID, "submitted_snapshot_missing", fmt.Sprintf("Batch member %s has no submitted snapshot for %s.", missingSnapshotTask, missingSnapshotPath)))
+		return Batch{}, commitBatchCheck(tx, session.ID, blocked(session.ID, "submitted_snapshot_missing", fmt.Sprintf("Batch task %s has no submitted snapshot for %s.", missingSnapshotTask, missingSnapshotPath)))
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return Batch{}, sessionInternal(session.ID, "inspect submitted snapshot coverage", err)
@@ -179,9 +179,9 @@ func (p *Project) FreezeBatch() (Batch, *Error) {
 	err = tx.QueryRow(`
 		SELECT dependency.task_id, dependency.prerequisite_id
 		FROM task_dependencies dependency
-		JOIN batch_members dependent_member ON dependent_member.task_id = dependency.task_id
-		JOIN batch_members prerequisite_member ON prerequisite_member.task_id = dependency.prerequisite_id
-		WHERE dependent_member.batch_id = ? AND prerequisite_member.batch_id = ?
+		JOIN batch_tasks dependent_task ON dependent_task.task_id = dependency.task_id
+		JOIN batch_tasks prerequisite_task ON prerequisite_task.task_id = dependency.prerequisite_id
+		WHERE dependent_task.batch_id = ? AND prerequisite_task.batch_id = ?
 		LIMIT 1`, batchID, batchID).Scan(&dependent, &prerequisite)
 	if err == nil {
 		return Batch{}, commitBatchCheck(tx, session.ID, invalidSession(session.ID, "same_batch_dependency", fmt.Sprintf("Task %s cannot share a batch with prerequisite %s.", dependent, prerequisite)))
@@ -214,7 +214,7 @@ func (p *Project) FreezeBatch() (Batch, *Error) {
 		if err := tx.QueryRow(`
 			SELECT COUNT(*)
 			FROM claims claim
-			JOIN batch_members member ON member.batch_id = claim.batch_id AND member.task_id = claim.task_id
+			JOIN batch_tasks batch_task ON batch_task.batch_id = claim.batch_id AND batch_task.task_id = claim.task_id
 			JOIN tasks task ON task.id = claim.task_id
 			JOIN submitted_snapshots snapshot ON snapshot.task_id = claim.task_id AND snapshot.path = claim.path
 			WHERE claim.session_id = ? AND claim.batch_id = ? AND claim.path = ? AND task.status = 'submitted'`, session.ID, batchID, changedPath).Scan(&submittedOwners); err != nil {
@@ -228,18 +228,18 @@ func (p *Project) FreezeBatch() (Batch, *Error) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := tx.Exec(`
 		INSERT INTO frozen_batch_paths(
-			batch_id, task_id, membership_order, claim_order, path,
+			batch_id, task_id, task_order, claim_order, path,
 			baseline_presence, baseline_type, baseline_content_hash, baseline_executable, baseline_content,
 			submitted_presence, submitted_type, submitted_content_hash, submitted_executable, submitted_content
 		)
-		SELECT claim.batch_id, claim.task_id, member.membership_order, claim.claim_order, claim.path,
+		SELECT claim.batch_id, claim.task_id, batch_task.task_order, claim.claim_order, claim.path,
 			claim.baseline_presence, claim.baseline_type, claim.baseline_content_hash, claim.baseline_executable, claim.baseline_content,
 			snapshot.presence, snapshot.file_type, snapshot.content_hash, snapshot.executable, snapshot.content
 		FROM claims claim
-		JOIN batch_members member ON member.batch_id = claim.batch_id AND member.task_id = claim.task_id
+		JOIN batch_tasks batch_task ON batch_task.batch_id = claim.batch_id AND batch_task.task_id = claim.task_id
 		JOIN submitted_snapshots snapshot ON snapshot.task_id = claim.task_id AND snapshot.path = claim.path
 		WHERE claim.batch_id = ?
-		ORDER BY member.membership_order, claim.claim_order`, batchID); err != nil {
+		ORDER BY batch_task.task_order, claim.claim_order`, batchID); err != nil {
 		return Batch{}, sessionInternal(session.ID, "persist frozen batch manifest", err)
 	}
 	if _, err := tx.Exec(`INSERT INTO batch_freezes(batch_id, frozen_at) VALUES(?, ?)`, batchID, now); err != nil {
@@ -337,10 +337,10 @@ func validateTaskBatchStatus(queryer rowQuerier, sessionID, taskID string, allow
 	var batchID, status string
 	err := queryer.QueryRow(`
 		SELECT batch.id, batch.status
-		FROM batch_members member JOIN batches batch ON batch.id = member.batch_id
-		WHERE member.task_id = ?`, taskID).Scan(&batchID, &status)
+		FROM batch_tasks task JOIN batches batch ON batch.id = task.batch_id
+		WHERE task.task_id = ?`, taskID).Scan(&batchID, &status)
 	if errors.Is(err, sql.ErrNoRows) {
-		return sessionInternal(sessionID, "validate task batch state", errors.New("material task has no batch membership"))
+		return sessionInternal(sessionID, "validate task batch state", errors.New("material task is not included in a Batch"))
 	}
 	if err != nil {
 		return sessionInternal(sessionID, "validate task batch state", err)
@@ -350,7 +350,7 @@ func validateTaskBatchStatus(queryer rowQuerier, sessionID, taskID string, allow
 			return nil
 		}
 	}
-	return invalidSession(sessionID, "batch_closed", fmt.Sprintf("Batch %s is %s and no longer accepts worker mutations.", batchID, status))
+	return invalidSession(sessionID, "batch_closed", fmt.Sprintf("Batch %s is %s and no longer accepts agent mutations.", batchID, status))
 }
 
 func inspectBatch(db *sql.DB, id string) (Batch, *Error) {
@@ -372,42 +372,42 @@ func inspectBatch(db *sql.DB, id string) (Batch, *Error) {
 		return Batch{}, internal("read batch", err)
 	}
 	batch.FrozenAt = frozenAt.String
-	batch.Members = []BatchMember{}
+	batch.Tasks = []BatchTask{}
 	batch.Manifest = []BatchPath{}
 	batch.Validation = []BatchValidationAttempt{}
 	batch.AuditHistory = []BatchAuditEvent{}
 
 	rows, err := db.Query(`
-		SELECT member.task_id, member.membership_order, task.creation_order, task.status, submission.outcome
-		FROM batch_members member
-		JOIN tasks task ON task.id = member.task_id
-		LEFT JOIN task_submissions submission ON submission.task_id = member.task_id
-		WHERE member.batch_id = ? ORDER BY member.membership_order`, batch.ID)
+		SELECT batch_task.task_id, batch_task.task_order, task.creation_order, task.status, submission.outcome
+		FROM batch_tasks batch_task
+		JOIN tasks task ON task.id = batch_task.task_id
+		LEFT JOIN task_submissions submission ON submission.task_id = batch_task.task_id
+		WHERE batch_task.batch_id = ? ORDER BY batch_task.task_order`, batch.ID)
 	if err != nil {
-		return Batch{}, sessionInternal(batch.SessionID, "read batch members", err)
+		return Batch{}, sessionInternal(batch.SessionID, "read batch tasks", err)
 	}
 	for rows.Next() {
-		var member BatchMember
+		var task BatchTask
 		var outcome sql.NullString
-		if err := rows.Scan(&member.TaskID, &member.MembershipOrder, &member.TaskOrder, &member.Status, &outcome); err != nil {
+		if err := rows.Scan(&task.TaskID, &task.TaskOrder, &task.CreationOrder, &task.Status, &outcome); err != nil {
 			rows.Close()
-			return Batch{}, sessionInternal(batch.SessionID, "read batch member", err)
+			return Batch{}, sessionInternal(batch.SessionID, "read batch task", err)
 		}
-		member.Outcome = outcome.String
-		batch.Members = append(batch.Members, member)
+		task.Outcome = outcome.String
+		batch.Tasks = append(batch.Tasks, task)
 	}
 	if err := rows.Close(); err != nil {
-		return Batch{}, sessionInternal(batch.SessionID, "close batch members", err)
+		return Batch{}, sessionInternal(batch.SessionID, "close batch tasks", err)
 	}
 	if err := rows.Err(); err != nil {
-		return Batch{}, sessionInternal(batch.SessionID, "read batch members", err)
+		return Batch{}, sessionInternal(batch.SessionID, "read batch tasks", err)
 	}
 
 	pathRows, err := db.Query(`
-		SELECT task_id, membership_order, claim_order, path,
+		SELECT task_id, task_order, claim_order, path,
 			baseline_presence, baseline_type, baseline_content_hash, baseline_executable,
 			submitted_presence, submitted_type, submitted_content_hash, submitted_executable
-		FROM frozen_batch_paths WHERE batch_id = ? ORDER BY membership_order, claim_order`, batch.ID)
+		FROM frozen_batch_paths WHERE batch_id = ? ORDER BY task_order, claim_order`, batch.ID)
 	if err != nil {
 		return Batch{}, sessionInternal(batch.SessionID, "read frozen batch manifest", err)
 	}
@@ -415,7 +415,7 @@ func inspectBatch(db *sql.DB, id string) (Batch, *Error) {
 		var batchPath BatchPath
 		var baselineHash, submittedHash sql.NullString
 		var baselineExecutable, submittedExecutable int
-		if err := pathRows.Scan(&batchPath.TaskID, &batchPath.MembershipOrder, &batchPath.ClaimOrder, &batchPath.Path,
+		if err := pathRows.Scan(&batchPath.TaskID, &batchPath.TaskOrder, &batchPath.ClaimOrder, &batchPath.Path,
 			&batchPath.Baseline.Presence, &batchPath.Baseline.Type, &baselineHash, &baselineExecutable,
 			&batchPath.Submitted.Presence, &batchPath.Submitted.Type, &submittedHash, &submittedExecutable); err != nil {
 			pathRows.Close()

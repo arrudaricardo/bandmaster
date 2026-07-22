@@ -12,11 +12,11 @@ import (
 func collectTasks(tx *sql.Tx, options DebugOptions, snapshot *DebugSnapshot) {
 	rows, err := tx.Query(`
 		SELECT task.id, task.creation_order, task.title, task.status,
-			COALESCE(task.worker_identity, ''), COALESCE(task.assignment_token, ''), task.core_frozen,
-			COALESCE(member.batch_id, ''), task.created_at, task.updated_at,
+			COALESCE(task.agent_identity, ''), COALESCE(task.assignment_token, ''), task.core_frozen,
+			COALESCE(batch_task.batch_id, ''), task.created_at, task.updated_at,
 			lease.status, lease.duration_nanos, lease.renewed_at, lease.expires_at
 		FROM tasks task
-		LEFT JOIN batch_members member ON member.task_id = task.id
+		LEFT JOIN batch_tasks batch_task ON batch_task.task_id = task.id
 		LEFT JOIN task_leases lease ON lease.task_id = task.id
 		WHERE task.session_id = ? ORDER BY task.creation_order`, snapshot.Session.ID)
 	if err != nil {
@@ -30,7 +30,7 @@ func collectTasks(tx *sql.Tx, options DebugOptions, snapshot *DebugSnapshot) {
 		var frozen int
 		var leaseStatus, renewedAt, expiresAt sql.NullString
 		var duration sql.NullInt64
-		if err := rows.Scan(&task.ID, &task.CreationOrder, &task.Title, &task.Status, &task.WorkerIdentity, &token, &frozen, &task.BatchID, &task.CreatedAt, &task.UpdatedAt, &leaseStatus, &duration, &renewedAt, &expiresAt); err != nil {
+		if err := rows.Scan(&task.ID, &task.CreationOrder, &task.Title, &task.Status, &task.AgentIdentity, &token, &frozen, &task.BatchID, &task.CreatedAt, &task.UpdatedAt, &leaseStatus, &duration, &renewedAt, &expiresAt); err != nil {
 			snapshot.addCollectionError("tasks", "task_unavailable", err, false)
 			return
 		}
@@ -123,7 +123,7 @@ func collectBatches(tx *sql.Tx, snapshot *DebugSnapshot) {
 	}
 	for rows.Next() {
 		var batch DebugBatch
-		batch.MemberTaskIDs = []string{}
+		batch.Tasks = []DebugBatchTask{}
 		batch.Manifest = []DebugManifestPath{}
 		batch.Validation = []DebugValidationAttempt{}
 		if err := rows.Scan(&batch.ID, &batch.CreationOrder, &batch.BaseBranch, &batch.BaseCommit, &batch.Status, &batch.CreatedAt, &batch.UpdatedAt); err != nil {
@@ -141,21 +141,21 @@ func collectBatches(tx *sql.Tx, snapshot *DebugSnapshot) {
 }
 
 func collectBatchRelationships(tx *sql.Tx, batch *DebugBatch, snapshot *DebugSnapshot) {
-	memberRows, err := tx.Query(`SELECT task_id FROM batch_members WHERE batch_id = ? ORDER BY membership_order`, batch.ID)
+	taskRows, err := tx.Query(`SELECT batch_task.task_id, batch_task.task_order, task.status FROM batch_tasks batch_task JOIN tasks task ON task.id = batch_task.task_id WHERE batch_task.batch_id = ? ORDER BY batch_task.task_order`, batch.ID)
 	if err != nil {
-		snapshot.addCollectionError("batches", "batch_members_unavailable", err, false)
+		snapshot.addCollectionError("batches", "batch_tasks_unavailable", err, false)
 	} else {
-		for memberRows.Next() {
-			var id string
-			if err := memberRows.Scan(&id); err != nil {
-				snapshot.addCollectionError("batches", "batch_member_unavailable", err, false)
+		for taskRows.Next() {
+			var task DebugBatchTask
+			if err := taskRows.Scan(&task.TaskID, &task.TaskOrder, &task.Status); err != nil {
+				snapshot.addCollectionError("batches", "batch_task_unavailable", err, false)
 				break
 			}
-			batch.MemberTaskIDs = append(batch.MemberTaskIDs, id)
+			batch.Tasks = append(batch.Tasks, task)
 		}
-		_ = memberRows.Close()
+		_ = taskRows.Close()
 	}
-	manifestRows, err := tx.Query(`SELECT task_id, path, COALESCE(baseline_content_hash, ''), COALESCE(submitted_content_hash, '') FROM frozen_batch_paths WHERE batch_id = ? ORDER BY membership_order, claim_order`, batch.ID)
+	manifestRows, err := tx.Query(`SELECT task_id, path, COALESCE(baseline_content_hash, ''), COALESCE(submitted_content_hash, '') FROM frozen_batch_paths WHERE batch_id = ? ORDER BY task_order, claim_order`, batch.ID)
 	if err != nil {
 		snapshot.addCollectionError("manifests", "manifest_unavailable", err, false)
 	} else {
@@ -285,35 +285,35 @@ func collectEvents(tx *sql.Tx, options DebugOptions, snapshot *DebugSnapshot) {
 	}
 }
 
-func deriveWorkers(snapshot *DebugSnapshot) {
-	workers := map[string]*DebugWorker{}
+func deriveAgents(snapshot *DebugSnapshot) {
+	agents := map[string]*DebugAgent{}
 	for _, task := range snapshot.Tasks {
-		if task.WorkerIdentity == "" {
+		if task.AgentIdentity == "" {
 			continue
 		}
-		worker := workers[task.WorkerIdentity]
-		if worker == nil {
-			worker = &DebugWorker{WorkerIdentity: task.WorkerIdentity, TaskIDs: []string{}, ClaimPaths: []string{}, Diagnostics: []string{}}
-			workers[task.WorkerIdentity] = worker
+		agent := agents[task.AgentIdentity]
+		if agent == nil {
+			agent = &DebugAgent{AgentIdentity: task.AgentIdentity, TaskIDs: []string{}, ClaimPaths: []string{}, Diagnostics: []string{}}
+			agents[task.AgentIdentity] = agent
 		}
-		worker.TaskIDs = append(worker.TaskIDs, task.ID)
-		if taskCanCarryLiveWorkerOwnership(task.Status) {
-			worker.ActiveTaskID = task.ID
-			worker.Lease = task.Lease
+		agent.TaskIDs = append(agent.TaskIDs, task.ID)
+		if taskCanCarryLiveAgentOwnership(task.Status) {
+			agent.ActiveTaskID = task.ID
+			agent.Lease = task.Lease
 		}
 		for _, claim := range task.Claims {
-			worker.ClaimPaths = append(worker.ClaimPaths, claim.Path)
+			agent.ClaimPaths = append(agent.ClaimPaths, claim.Path)
 		}
-		if task.UpdatedAt > worker.LastActivityAt {
-			worker.LastActivityAt = task.UpdatedAt
+		if task.UpdatedAt > agent.LastActivityAt {
+			agent.LastActivityAt = task.UpdatedAt
 		}
 	}
-	for _, worker := range workers {
-		worker.TaskIDs = sortedUnique(worker.TaskIDs)
-		worker.ClaimPaths = sortedUnique(worker.ClaimPaths)
-		snapshot.Workers = append(snapshot.Workers, *worker)
+	for _, agent := range agents {
+		agent.TaskIDs = sortedUnique(agent.TaskIDs)
+		agent.ClaimPaths = sortedUnique(agent.ClaimPaths)
+		snapshot.Agents = append(snapshot.Agents, *agent)
 	}
-	sort.Slice(snapshot.Workers, func(i, j int) bool { return snapshot.Workers[i].WorkerIdentity < snapshot.Workers[j].WorkerIdentity })
+	sort.Slice(snapshot.Agents, func(i, j int) bool { return snapshot.Agents[i].AgentIdentity < snapshot.Agents[j].AgentIdentity })
 }
 
 func (p *Project) deriveDiagnostics(snapshot *DebugSnapshot) {
@@ -331,8 +331,8 @@ func (p *Project) deriveDiagnostics(snapshot *DebugSnapshot) {
 		if affected.TaskIDs == nil {
 			affected.TaskIDs = []string{}
 		}
-		if affected.Workers == nil {
-			affected.Workers = []string{}
+		if affected.Agents == nil {
+			affected.Agents = []string{}
 		}
 		if affected.Paths == nil {
 			affected.Paths = []string{}
@@ -380,13 +380,13 @@ func (p *Project) deriveDiagnostics(snapshot *DebugSnapshot) {
 		statusByTask[task.ID] = task.Status
 	}
 	for _, task := range snapshot.Tasks {
-		liveWorkerOwnership := taskCanCarryLiveWorkerOwnership(task.Status)
-		if liveWorkerOwnership && task.WorkerIdentity != "" && task.Lease != nil {
+		liveAgentOwnership := taskCanCarryLiveAgentOwnership(task.Status)
+		if liveAgentOwnership && task.AgentIdentity != "" && task.Lease != nil {
 			expires, err := time.Parse(time.RFC3339Nano, task.Lease.ExpiresAt)
 			if err == nil && now.After(expires) && task.Lease.Status == "active" {
-				addDiagnostic("lease_expired", "error", DebugAffected{TaskIDs: []string{task.ID}, Workers: []string{task.WorkerIdentity}}, map[string]any{"expires_at": task.Lease.ExpiresAt}, "bandmaster task recover "+task.ID+" --terminated-worker "+task.WorkerIdentity+" --termination-proof <proof> --json", "bandmaster task inspect "+task.ID+" --json")
+				addDiagnostic("lease_expired", "error", DebugAffected{TaskIDs: []string{task.ID}, Agents: []string{task.AgentIdentity}}, map[string]any{"expires_at": task.Lease.ExpiresAt}, "bandmaster task recover "+task.ID+" --terminated-agent "+task.AgentIdentity+" --termination-proof <proof> --json", "bandmaster task inspect "+task.ID+" --json")
 			} else if err == nil && task.AssignmentTokenPresent && task.Lease.Status == "active" && expires.Sub(now) <= time.Duration(task.Lease.DurationNanos)/4 {
-				addDiagnostic("lease_expiring", "warning", DebugAffected{TaskIDs: []string{task.ID}, Workers: []string{task.WorkerIdentity}}, map[string]any{"expires_at": task.Lease.ExpiresAt, "remaining_milliseconds": expires.Sub(now).Milliseconds()}, "bandmaster task heartbeat "+task.ID+" --token <assignment-token> --json")
+				addDiagnostic("lease_expiring", "warning", DebugAffected{TaskIDs: []string{task.ID}, Agents: []string{task.AgentIdentity}}, map[string]any{"expires_at": task.Lease.ExpiresAt, "remaining_milliseconds": expires.Sub(now).Milliseconds()}, "bandmaster task heartbeat "+task.ID+" --token <assignment-token> --json")
 			}
 		}
 		if task.Status == "blocked" {
@@ -412,8 +412,8 @@ func (p *Project) deriveDiagnostics(snapshot *DebugSnapshot) {
 				addDiagnostic("dependency_wait", "info", DebugAffected{TaskIDs: []string{task.ID, prerequisite}}, map[string]any{"task_id": task.ID, "prerequisite_id": prerequisite, "prerequisite_status": statusByTask[prerequisite]}, "bandmaster task inspect "+prerequisite+" --json")
 			}
 		}
-		if taskCanCarryLiveWorkerOwnership(task.Status) && (task.WorkerIdentity == "" || task.Lease == nil) {
-			addDiagnostic("worker_invariant_failure", "critical", DebugAffected{TaskIDs: []string{task.ID}, Workers: []string{task.WorkerIdentity}}, map[string]any{"status": task.Status, "worker_present": task.WorkerIdentity != "", "lease_present": task.Lease != nil}, "bandmaster doctor --json")
+		if taskCanCarryLiveAgentOwnership(task.Status) && (task.AgentIdentity == "" || task.Lease == nil) {
+			addDiagnostic("agent_invariant_failure", "critical", DebugAffected{TaskIDs: []string{task.ID}, Agents: []string{task.AgentIdentity}}, map[string]any{"status": task.Status, "agent_present": task.AgentIdentity != "", "lease_present": task.Lease != nil}, "bandmaster doctor --json")
 		}
 	}
 	for _, event := range snapshot.Events {
@@ -421,20 +421,20 @@ func (p *Project) deriveDiagnostics(snapshot *DebugSnapshot) {
 			addDiagnostic("claim_contention", "warning", DebugAffected{TaskIDs: []string{event.EntityID}}, map[string]any{"event_sequence": event.Sequence, "occurred_at": event.OccurredAt}, "bandmaster task requeue "+event.EntityID+" --json")
 		}
 	}
-	for index := range snapshot.Workers {
+	for index := range snapshot.Agents {
 		for _, diagnostic := range snapshot.Diagnostics {
-			for _, worker := range diagnostic.Affected.Workers {
-				if worker == snapshot.Workers[index].WorkerIdentity {
-					snapshot.Workers[index].Diagnostics = append(snapshot.Workers[index].Diagnostics, diagnostic.Code)
+			for _, agent := range diagnostic.Affected.Agents {
+				if agent == snapshot.Agents[index].AgentIdentity {
+					snapshot.Agents[index].Diagnostics = append(snapshot.Agents[index].Diagnostics, diagnostic.Code)
 				}
 			}
 		}
-		snapshot.Workers[index].Diagnostics = sortedUnique(snapshot.Workers[index].Diagnostics)
+		snapshot.Agents[index].Diagnostics = sortedUnique(snapshot.Agents[index].Diagnostics)
 	}
 	_ = p
 }
 
-func taskCanCarryLiveWorkerOwnership(status string) bool {
+func taskCanCarryLiveAgentOwnership(status string) bool {
 	return status == "assigned" || status == "editing"
 }
 
@@ -443,12 +443,12 @@ func DebugSemanticState(snapshot DebugSnapshot) ([]byte, error) {
 	value := struct {
 		Session     *DebugSession     `json:"session"`
 		Tasks       []DebugTask       `json:"tasks"`
-		Workers     []DebugWorker     `json:"workers"`
+		Agents      []DebugAgent      `json:"agents"`
 		Batches     []DebugBatch      `json:"batches"`
 		Monitors    map[string]any    `json:"monitors"`
 		Integrity   []DebugIntegrity  `json:"integrity"`
 		Diagnostics []DebugDiagnostic `json:"diagnostics"`
-	}{snapshot.Session, snapshot.Tasks, snapshot.Workers, snapshot.Batches, monitorMap(snapshot.Monitors), snapshot.Integrity, snapshot.Diagnostics}
+	}{snapshot.Session, snapshot.Tasks, snapshot.Agents, snapshot.Batches, monitorMap(snapshot.Monitors), snapshot.Integrity, snapshot.Diagnostics}
 	return json.Marshal(value)
 }
 
@@ -463,7 +463,7 @@ func DebugChanges(previous, current DebugSnapshot) []DebugChange {
 		changes = append(changes, DebugChange{Kind: "session_changed", EntityType: "session", Before: previous.Session, After: current.Session})
 	}
 	changes = appendEntityChanges(changes, "task", taskMap(previous.Tasks), taskMap(current.Tasks))
-	changes = appendEntityChanges(changes, "worker", workerMap(previous.Workers), workerMap(current.Workers))
+	changes = appendEntityChanges(changes, "agent", agentMap(previous.Agents), agentMap(current.Agents))
 	changes = appendEntityChanges(changes, "batch", batchMap(previous.Batches), batchMap(current.Batches))
 	changes = appendEntityChanges(changes, "monitor", monitorMap(previous.Monitors), monitorMap(current.Monitors))
 	changes = appendEntityChanges(changes, "integrity_violation", integrityMap(previous.Integrity), integrityMap(current.Integrity))
@@ -504,8 +504,8 @@ func appendEntityChanges(changes []DebugChange, entity string, before, after map
 func taskMap(values []DebugTask) map[string]any {
 	return indexDebugEntities(values, func(value DebugTask) string { return value.ID })
 }
-func workerMap(values []DebugWorker) map[string]any {
-	return indexDebugEntities(values, func(value DebugWorker) string { return value.WorkerIdentity })
+func agentMap(values []DebugAgent) map[string]any {
+	return indexDebugEntities(values, func(value DebugAgent) string { return value.AgentIdentity })
 }
 func batchMap(values []DebugBatch) map[string]any {
 	return indexDebugEntities(values, func(value DebugBatch) string { return value.ID })

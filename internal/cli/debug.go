@@ -85,7 +85,7 @@ func runDebug(currentProject *project.Project, options debugCLIOptions, jsonOutp
 		return writeProjectError(stdout, stderr, jsonOutput, "debug", projectError)
 	}
 	if jsonOutput {
-		return writeJSON(stdout, envelope{SchemaVersion: "1", Command: "debug", Success: true, SessionID: snapshotSessionID(snapshot), Result: snapshot})
+		return writeJSON(stdout, envelope{SchemaVersion: "2", Command: "debug", Success: true, SessionID: snapshotSessionID(snapshot), Result: snapshot})
 	}
 	return writeDebugHuman(stdout, snapshot)
 }
@@ -117,7 +117,7 @@ func writeDebugHuman(output io.Writer, snapshot project.DebugSnapshot) int {
 			history = " (historical)"
 		}
 		text.WriteString(fmt.Sprintf("Session: %s [%s]%s\n", snapshot.Session.ID, snapshot.Session.Status, history))
-		text.WriteString(fmt.Sprintf("Workers: %d · Tasks: %d · Batches: %d · Diagnostics: %d\n", len(snapshot.Workers), len(snapshot.Tasks), len(snapshot.Batches), len(snapshot.Diagnostics)))
+		text.WriteString(fmt.Sprintf("Agents: %d · Tasks: %d · Batches: %d · Diagnostics: %d\n", len(snapshot.Agents), len(snapshot.Tasks), len(snapshot.Batches), len(snapshot.Diagnostics)))
 		for _, diagnostic := range snapshot.Diagnostics {
 			text.WriteString(fmt.Sprintf("- %s [%s]", diagnostic.Code, diagnostic.Severity))
 			if len(diagnostic.SuggestedActions) > 0 {
@@ -175,7 +175,7 @@ func runDebugWatch(currentProject *project.Project, projectOptions project.Debug
 	}
 	sequence := int64(1)
 	now := time.Now().UTC()
-	if err := writeStreamRecord(stdout, debugStreamRecord{SchemaVersion: "1", StreamVersion: "1", Sequence: sequence, Type: "snapshot", CapturedAt: now.Format(time.RFC3339Nano), Snapshot: &current}); err != nil {
+	if err := writeStreamRecord(stdout, debugStreamRecord{SchemaVersion: "2", StreamVersion: "2", Sequence: sequence, Type: "snapshot", CapturedAt: now.Format(time.RFC3339Nano), Snapshot: &current}); err != nil {
 		return exitInternal
 	}
 	wasPartial := current.Collection.Status == "partial"
@@ -197,7 +197,7 @@ func runDebugWatch(currentProject *project.Project, projectOptions project.Debug
 			if projectError != nil {
 				sequence++
 				collection := project.DebugCollection{Status: "partial", Stable: false, CapturedAt: captured.UTC().Format(time.RFC3339Nano), Errors: []project.DebugCollectionError{{Section: "snapshot", Code: projectError.Code, Message: projectError.Message, Retryable: projectError.Retryable}}}
-				if err := writeStreamRecord(stdout, debugStreamRecord{SchemaVersion: "1", StreamVersion: "1", Sequence: sequence, Type: "collection_error", CapturedAt: collection.CapturedAt, Collection: &collection}); err != nil {
+				if err := writeStreamRecord(stdout, debugStreamRecord{SchemaVersion: "2", StreamVersion: "2", Sequence: sequence, Type: "collection_error", CapturedAt: collection.CapturedAt, Collection: &collection}); err != nil {
 					return exitInternal
 				}
 				wasPartial = true
@@ -208,12 +208,12 @@ func runDebugWatch(currentProject *project.Project, projectOptions project.Debug
 			}
 			if next.Collection.Status == "partial" {
 				sequence++
-				if err := writeStreamRecord(stdout, debugStreamRecord{SchemaVersion: "1", StreamVersion: "1", Sequence: sequence, Type: "collection_error", CapturedAt: captured.UTC().Format(time.RFC3339Nano), Collection: &next.Collection, Revision: &next.Revision}); err != nil {
+				if err := writeStreamRecord(stdout, debugStreamRecord{SchemaVersion: "2", StreamVersion: "2", Sequence: sequence, Type: "collection_error", CapturedAt: captured.UTC().Format(time.RFC3339Nano), Collection: &next.Collection, Revision: &next.Revision}); err != nil {
 					return exitInternal
 				}
 			} else if wasPartial {
 				sequence++
-				if err := writeStreamRecord(stdout, debugStreamRecord{SchemaVersion: "1", StreamVersion: "1", Sequence: sequence, Type: "recovered", CapturedAt: captured.UTC().Format(time.RFC3339Nano), Collection: &next.Collection, Revision: &next.Revision}); err != nil {
+				if err := writeStreamRecord(stdout, debugStreamRecord{SchemaVersion: "2", StreamVersion: "2", Sequence: sequence, Type: "recovered", CapturedAt: captured.UTC().Format(time.RFC3339Nano), Collection: &next.Collection, Revision: &next.Revision}); err != nil {
 					return exitInternal
 				}
 			}
@@ -221,14 +221,14 @@ func runDebugWatch(currentProject *project.Project, projectOptions project.Debug
 			for _, change := range project.DebugChanges(current, next) {
 				sequence++
 				change := change
-				if err := writeStreamRecord(stdout, debugStreamRecord{SchemaVersion: "1", StreamVersion: "1", Sequence: sequence, Type: "change", CapturedAt: captured.UTC().Format(time.RFC3339Nano), Change: &change, Revision: &next.Revision}); err != nil {
+				if err := writeStreamRecord(stdout, debugStreamRecord{SchemaVersion: "2", StreamVersion: "2", Sequence: sequence, Type: "change", CapturedAt: captured.UTC().Format(time.RFC3339Nano), Change: &change, Revision: &next.Revision}); err != nil {
 					return exitInternal
 				}
 			}
 			current = next
 		case captured := <-heartbeat.C:
 			sequence++
-			if err := writeStreamRecord(stdout, debugStreamRecord{SchemaVersion: "1", StreamVersion: "1", Sequence: sequence, Type: "heartbeat", CapturedAt: captured.UTC().Format(time.RFC3339Nano), Revision: &current.Revision, Collection: &current.Collection}); err != nil {
+			if err := writeStreamRecord(stdout, debugStreamRecord{SchemaVersion: "2", StreamVersion: "2", Sequence: sequence, Type: "heartbeat", CapturedAt: captured.UTC().Format(time.RFC3339Nano), Revision: &current.Revision, Collection: &current.Collection}); err != nil {
 				return exitInternal
 			}
 		}

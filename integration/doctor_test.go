@@ -106,7 +106,7 @@ func TestDoctorHealthyIsStrictlyReadOnly(t *testing.T) {
 		t.Fatalf("doctor failed: %+v", result)
 	}
 	response := decodeDoctor(t, result)
-	if response.SchemaVersion != "1" || response.Command != "doctor" || !response.Success || !response.Result.Healthy || len(response.Result.Findings) != 0 {
+	if response.SchemaVersion != "2" || response.Command != "doctor" || !response.Success || !response.Result.Healthy || len(response.Result.Findings) != 0 {
 		t.Fatalf("unexpected healthy doctor result: %+v", response)
 	}
 	after := snapshotDoctorState(t, repo)
@@ -136,7 +136,7 @@ func TestDoctorReportsStateJournalIntegrityAndCleanupFindings(t *testing.T) {
 		repo := repositoryWithValidation(t, "")
 		started := successfulSessionCommand(t, repo, "start")
 		task := successfulTaskCommand(t, repo, "create", "--title", "Journal doctor", "--intent", "Create journal evidence", "--expected-outcome", "Diagnosed interruption")
-		assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "doctor-journal")
+		assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "doctor-journal")
 		successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "owned.txt")
 		writeFile(t, filepath.Join(repo, "owned.txt"), "journal\n")
 		submitBatchTask(t, repo, task.Result.ID, assignment.Result.AssignmentToken)
@@ -188,7 +188,7 @@ func TestDoctorReportsStateJournalIntegrityAndCleanupFindings(t *testing.T) {
 		repo := repositoryWithValidation(t, "")
 		successfulSessionCommand(t, repo, "start")
 		task := successfulTaskCommand(t, repo, "create", "--title", "Residue", "--intent", "Diagnose staged finalization", "--expected-outcome", "Specific finding")
-		assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "doctor-residue")
+		assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "doctor-residue")
 		successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "owned.txt")
 		writeFile(t, filepath.Join(repo, "owned.txt"), "residue\n")
 		submitBatchTask(t, repo, task.Result.ID, assignment.Result.AssignmentToken)
@@ -212,7 +212,7 @@ func TestDoctorReportsStateJournalIntegrityAndCleanupFindings(t *testing.T) {
 		repo := repositoryWithValidation(t, "")
 		successfulSessionCommand(t, repo, "start")
 		task := successfulTaskCommand(t, repo, "create", "--title", "Unrelated residue", "--intent", "Correlate journal paths", "--expected-outcome", "Generic drift remains generic")
-		assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "doctor-unrelated")
+		assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "doctor-unrelated")
 		successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "owned.txt")
 		writeFile(t, filepath.Join(repo, "owned.txt"), "submitted\n")
 		submitBatchTask(t, repo, task.Result.ID, assignment.Result.AssignmentToken)
@@ -236,7 +236,7 @@ func TestDoctorReportsStateJournalIntegrityAndCleanupFindings(t *testing.T) {
 		repo := approvedCleanRepository(t)
 		successfulSessionCommand(t, repo, "start")
 		task := successfulTaskCommand(t, repo, "create", "--title", "Legacy blocker", "--intent", "Expose dependency", "--expected-outcome", "Doctor action")
-		assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "doctor-db")
+		assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "doctor-db")
 		successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "blocker.txt")
 		db := openDoctorState(t, repo)
 		if _, err := db.Exec(`CREATE TABLE legacy_claim_dependency(task_id TEXT, path TEXT, FOREIGN KEY(task_id, path) REFERENCES claims(task_id, path))`); err != nil {

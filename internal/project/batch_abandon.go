@@ -77,7 +77,7 @@ func (p *Project) AbandonBatch(reason, confirmation string) (BatchAbandonmentRes
 	}
 	if strings.TrimSpace(confirmation) == "" {
 		db.Close()
-		return BatchAbandonmentResult{}, invalidSession(session.ID, "batch_abandonment_confirmation_required", "Batch abandonment requires --confirmation that every worker and finalization process has stopped.")
+		return BatchAbandonmentResult{}, invalidSession(session.ID, "batch_abandonment_confirmation_required", "Batch abandonment requires --confirmation that every agent and finalization process has stopped.")
 	}
 	if !abandonableBatchStatus(batchStatus) {
 		db.Close()
@@ -203,15 +203,15 @@ func applyBatchAbandonment(db *sql.DB, result BatchAbandonmentResult, currentSes
 	}
 	defer tx.Rollback()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	rows, err := tx.Query(`SELECT id, status, COALESCE(worker_identity, '') FROM tasks WHERE id IN (SELECT task_id FROM batch_members WHERE batch_id = ?) AND status NOT IN ('committed', 'no_op', 'canceled') ORDER BY creation_order`, result.BatchID)
+	rows, err := tx.Query(`SELECT id, status, COALESCE(agent_identity, '') FROM tasks WHERE id IN (SELECT task_id FROM batch_tasks WHERE batch_id = ?) AND status NOT IN ('committed', 'no_op', 'canceled') ORDER BY creation_order`, result.BatchID)
 	if err != nil {
 		return sessionInternal(result.SessionID, "read abandonment tasks", err)
 	}
-	type taskState struct{ id, status, worker string }
+	type taskState struct{ id, status, agent string }
 	var tasks []taskState
 	for rows.Next() {
 		var task taskState
-		if err := rows.Scan(&task.id, &task.status, &task.worker); err != nil {
+		if err := rows.Scan(&task.id, &task.status, &task.agent); err != nil {
 			rows.Close()
 			return sessionInternal(result.SessionID, "read abandonment task", err)
 		}
@@ -221,10 +221,10 @@ func applyBatchAbandonment(db *sql.DB, result BatchAbandonmentResult, currentSes
 		return sessionInternal(result.SessionID, "close abandonment tasks", err)
 	}
 	for _, task := range tasks {
-		if _, err := tx.Exec(`UPDATE tasks SET status = 'canceled', worker_identity = NULL, assignment_token = NULL, updated_at = ? WHERE id = ?`, now, task.id); err != nil {
+		if _, err := tx.Exec(`UPDATE tasks SET status = 'canceled', agent_identity = NULL, assignment_token = NULL, updated_at = ? WHERE id = ?`, now, task.id); err != nil {
 			return sessionInternal(result.SessionID, "cancel abandoned task", err)
 		}
-		if _, err := tx.Exec(`INSERT INTO task_audit_events(session_id, task_id, event, from_status, to_status, worker_identity, termination_proof, occurred_at) VALUES(?, ?, 'batch_abandoned', ?, 'canceled', NULLIF(?, ''), ?, ?)`, result.SessionID, task.id, task.status, task.worker, result.Confirmation, now); err != nil {
+		if _, err := tx.Exec(`INSERT INTO task_audit_events(session_id, task_id, event, from_status, to_status, agent_identity, termination_proof, occurred_at) VALUES(?, ?, 'batch_abandoned', ?, 'canceled', NULLIF(?, ''), ?, ?)`, result.SessionID, task.id, task.status, task.agent, result.Confirmation, now); err != nil {
 			return sessionInternal(result.SessionID, "audit abandoned task", err)
 		}
 	}

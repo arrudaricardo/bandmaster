@@ -101,7 +101,7 @@ func TestSessionStartPersistsRepositoryBaselineAndAuditHistory(t *testing.T) {
 		t.Fatalf("session start exit code = %d, stdout = %s, stderr = %s", started.exitCode, started.stdout, started.stderr)
 	}
 	startResponse := decodeSessionResponse(t, started.stdout)
-	if !startResponse.Success || startResponse.Command != "session start" || startResponse.SchemaVersion != "1" {
+	if !startResponse.Success || startResponse.Command != "session start" || startResponse.SchemaVersion != "2" {
 		t.Fatalf("unexpected start response: %+v", startResponse)
 	}
 	if startResponse.SessionID == "" || startResponse.Result.ID != startResponse.SessionID {
@@ -164,7 +164,7 @@ func TestSessionAbortPreservesEditsAndRequiresTerminationConfirmation(t *testing
 	repo := approvedCleanRepository(t)
 	successfulSessionCommand(t, repo, "start")
 	task := successfulTaskCommand(t, repo, "create", "--title", "Abort work", "--intent", "Preserve edits", "--expected-outcome", "Quarantine ownership")
-	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "abort-worker")
+	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "abort-agent")
 	successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "owned.txt")
 	writeFile(t, filepath.Join(repo, "owned.txt"), "preserved work\n")
 
@@ -172,7 +172,7 @@ func TestSessionAbortPreservesEditsAndRequiresTerminationConfirmation(t *testing
 	if waiting.exitCode != 3 {
 		t.Fatalf("abort without proof exit code = %d: %s", waiting.exitCode, waiting.stdout)
 	}
-	if response := decodeSessionResponse(t, waiting.stdout); response.Error.Code != "worker_termination_confirmation_required" {
+	if response := decodeSessionResponse(t, waiting.stdout); response.Error.Code != "agent_termination_confirmation_required" {
 		t.Fatalf("unexpected abort proof error: %+v", response)
 	}
 	if session := successfulSessionCommand(t, repo, "inspect"); session.Result.Status != "active" || session.Result.Monitor == nil || session.Result.Monitor.Status != "healthy" {
@@ -182,7 +182,7 @@ func TestSessionAbortPreservesEditsAndRequiresTerminationConfirmation(t *testing
 		t.Fatalf("abort without proof mutated task ownership: %+v", taskState.Result)
 	}
 
-	abortResult := runBandmaster(t, repo, "session", "abort", "--termination-confirmation", "worker handle exited", "--json")
+	abortResult := runBandmaster(t, repo, "session", "abort", "--termination-confirmation", "agent handle exited", "--json")
 	if abortResult.exitCode != 0 {
 		t.Fatalf("confirmed abort failed: %+v", abortResult)
 	}
@@ -206,7 +206,7 @@ func TestSessionAbortPreservesEditsAndRequiresTerminationConfirmation(t *testing
 	}
 }
 
-func TestSessionAbortWithoutWorkersCompletesImmediately(t *testing.T) {
+func TestSessionAbortWithoutAgentsCompletesImmediately(t *testing.T) {
 	repo := approvedCleanRepository(t)
 	successfulSessionCommand(t, repo, "start")
 	aborted := successfulSessionCommand(t, repo, "abort")
@@ -219,7 +219,7 @@ func TestSessionAbortDryRunReturnsPlanWithoutMutation(t *testing.T) {
 	repo := approvedCleanRepository(t)
 	started := successfulSessionCommand(t, repo, "start")
 	task := successfulTaskCommand(t, repo, "create", "--title", "Preview abort", "--intent", "Inspect disposition", "--expected-outcome", "No mutation")
-	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-abort-preview")
+	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "agent-abort-preview")
 	claimed := successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "preview.txt")
 	beforeTask := successfulTaskCommand(t, repo, "inspect", task.Result.ID)
 	beforeSession := successfulSessionCommand(t, repo, "inspect")
@@ -238,7 +238,7 @@ func TestSessionAbortDryRunReturnsPlanWithoutMutation(t *testing.T) {
 	if len(preview.Result.Tasks) != 1 || preview.Result.Tasks[0].TaskID != task.Result.ID || preview.Result.Tasks[0].CurrentStatus != "editing" || preview.Result.Tasks[0].TargetStatus != "quarantined" || len(preview.Result.ActiveClaims) != 1 || preview.Result.ActiveClaims[0].Path != "preview.txt" || len(preview.Result.Batches) != 1 || len(preview.Result.Files) != 1 || preview.Result.Files[0] != "preview.txt" {
 		t.Fatalf("abort plan omitted affected state: %+v", preview.Result)
 	}
-	if len(preview.Result.PreservedArtifacts) == 0 || len(preview.Result.Blockers) != 1 || preview.Result.Blockers[0].Code != "worker_termination_confirmation_required" {
+	if len(preview.Result.PreservedArtifacts) == 0 || len(preview.Result.Blockers) != 1 || preview.Result.Blockers[0].Code != "agent_termination_confirmation_required" {
 		t.Fatalf("abort plan omitted preserved evidence or blockers: %+v", preview.Result)
 	}
 
@@ -256,11 +256,11 @@ func TestSessionAbortCleanupFailureRollsBackAndRetryCompletes(t *testing.T) {
 	repo := approvedCleanRepository(t)
 	successfulSessionCommand(t, repo, "start")
 	task := successfulTaskCommand(t, repo, "create", "--title", "Retry abort", "--intent", "Roll back cleanup", "--expected-outcome", "Retry completes")
-	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-abort-retry")
+	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "agent-abort-retry")
 	successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "retry.txt")
 	before := successfulTaskCommand(t, repo, "inspect", task.Result.ID)
 
-	failed := runBandmasterWithEnvironment(t, repo, []string{"BANDMASTER_TEST_FAIL_ABORT_AT=after-claim-release"}, "session", "abort", "--termination-confirmation", "worker stopped", "--json")
+	failed := runBandmasterWithEnvironment(t, repo, []string{"BANDMASTER_TEST_FAIL_ABORT_AT=after-claim-release"}, "session", "abort", "--termination-confirmation", "agent stopped", "--json")
 	if failed.exitCode == 0 || !strings.Contains(failed.stdout, "abort_cleanup_failed") {
 		t.Fatalf("injected abort cleanup did not fail safely: %+v", failed)
 	}
@@ -272,7 +272,7 @@ func TestSessionAbortCleanupFailureRollsBackAndRetryCompletes(t *testing.T) {
 		t.Fatalf("failed abort left a non-retryable durable state: %+v", session.Result)
 	}
 
-	retried := runBandmaster(t, repo, "session", "abort", "--termination-confirmation", "worker stopped", "--json")
+	retried := runBandmaster(t, repo, "session", "abort", "--termination-confirmation", "agent stopped", "--json")
 	if retried.exitCode != 0 {
 		t.Fatalf("abort retry failed: exit=%d stdout=%s stderr=%s", retried.exitCode, retried.stdout, retried.stderr)
 	}
@@ -285,13 +285,13 @@ func TestSessionAbortRequiresFinalizationReconciliation(t *testing.T) {
 	repo := repositoryWithValidation(t, "")
 	successfulSessionCommand(t, repo, "start")
 	task := successfulTaskCommand(t, repo, "create", "--title", "Frozen abort", "--intent", "Require reconciliation", "--expected-outcome", "Abort remains fail closed")
-	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-frozen-abort")
+	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "agent-frozen-abort")
 	successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "owned.txt")
 	writeFile(t, filepath.Join(repo, "owned.txt"), "frozen abort\n")
 	submitBatchTask(t, repo, task.Result.ID, assignment.Result.AssignmentToken)
 	successfulBatchCommand(t, repo, "freeze")
 
-	previewResult := runBandmaster(t, repo, "session", "abort", "--dry-run", "--termination-confirmation", "worker stopped", "--json")
+	previewResult := runBandmaster(t, repo, "session", "abort", "--dry-run", "--termination-confirmation", "agent stopped", "--json")
 	if previewResult.exitCode != 0 {
 		t.Fatalf("frozen abort preview failed: %+v", previewResult)
 	}
@@ -302,7 +302,7 @@ func TestSessionAbortRequiresFinalizationReconciliation(t *testing.T) {
 	if len(preview.Result.Blockers) != 1 || preview.Result.Blockers[0].Code != "finalization_recovery_required" || len(preview.Result.Batches) != 1 || preview.Result.Batches[0].Status != "frozen" {
 		t.Fatalf("frozen abort plan did not require reconciliation: %+v", preview.Result)
 	}
-	blocked := runBandmaster(t, repo, "session", "abort", "--termination-confirmation", "worker stopped", "--json")
+	blocked := runBandmaster(t, repo, "session", "abort", "--termination-confirmation", "agent stopped", "--json")
 	if blocked.exitCode != 3 || !strings.Contains(blocked.stdout, "finalization_recovery_required") {
 		t.Fatalf("unreconciled finalizing work was aborted: %+v", blocked)
 	}
@@ -318,7 +318,7 @@ func TestSessionAbortPreservesQuarantinedFailureEvidence(t *testing.T) {
 	runGit(t, repo, "-c", "user.name=Bandmaster Tests", "-c", "user.email=bandmaster@example.invalid", "commit", "-m", "Add quarantine fixture")
 	successfulSessionCommand(t, repo, "start")
 	task := successfulTaskCommand(t, repo, "create", "--title", "Abort quarantine", "--intent", "Preserve failure evidence", "--expected-outcome", "Abort remains auditable")
-	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-quarantined-abort")
+	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "agent-quarantined-abort")
 	successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "quarantined.txt")
 	writeFile(t, filepath.Join(repo, "quarantined.txt"), "submitted\n")
 	if reviewed := runBandmaster(t, repo, "task", "diff", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--json"); reviewed.exitCode != 0 {
@@ -335,7 +335,7 @@ func TestSessionAbortPreservesQuarantinedFailureEvidence(t *testing.T) {
 	paused := waitForSessionStatus(t, repo, "paused")
 	unresolvedViolation(t, paused, "submitted_path_drift", "quarantined.txt")
 
-	aborted := runBandmaster(t, repo, "session", "abort", "--termination-confirmation", "worker stopped", "--json")
+	aborted := runBandmaster(t, repo, "session", "abort", "--termination-confirmation", "agent stopped", "--json")
 	if aborted.exitCode != 0 {
 		t.Fatalf("abort quarantined work: exit=%d stdout=%s stderr=%s", aborted.exitCode, aborted.stdout, aborted.stderr)
 	}
@@ -353,7 +353,7 @@ func TestSessionAbortCompletesAfterFinalizationRecovery(t *testing.T) {
 	repo := repositoryWithValidation(t, "")
 	successfulSessionCommand(t, repo, "start")
 	task := successfulTaskCommand(t, repo, "create", "--title", "Recover then abort", "--intent", "Reconcile finalization first", "--expected-outcome", "Abort repair-pending work")
-	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-recovered-abort")
+	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "agent-recovered-abort")
 	successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "owned.txt")
 	writeFile(t, filepath.Join(repo, "owned.txt"), "recovered abort\n")
 	submitBatchTask(t, repo, task.Result.ID, assignment.Result.AssignmentToken)
@@ -363,7 +363,7 @@ func TestSessionAbortCompletesAfterFinalizationRecovery(t *testing.T) {
 	if crashed.exitCode != 97 {
 		t.Fatalf("did not create interrupted finalization: %+v", crashed)
 	}
-	previewResult := runBandmaster(t, repo, "session", "abort", "--dry-run", "--termination-confirmation", "worker stopped", "--json")
+	previewResult := runBandmaster(t, repo, "session", "abort", "--dry-run", "--termination-confirmation", "agent stopped", "--json")
 	if previewResult.exitCode != 0 {
 		t.Fatalf("preview interrupted finalization abort: %+v", previewResult)
 	}
@@ -381,7 +381,7 @@ func TestSessionAbortCompletesAfterFinalizationRecovery(t *testing.T) {
 	if batch := successfulBatchCommand(t, repo, "inspect"); batch.Result.Status != "repair_pending" || len(batch.Result.Manifest) != 1 {
 		t.Fatalf("finalization recovery did not retain repair evidence: %+v", batch.Result)
 	}
-	aborted := runBandmaster(t, repo, "session", "abort", "--termination-confirmation", "worker stopped", "--json")
+	aborted := runBandmaster(t, repo, "session", "abort", "--termination-confirmation", "agent stopped", "--json")
 	if aborted.exitCode != 0 || decodeSessionResponse(t, aborted.stdout).Result.Status != "aborted" {
 		t.Fatalf("abort after finalization recovery failed: %+v", aborted)
 	}
@@ -397,7 +397,7 @@ func TestSessionAbortReleasesSubmittedClaimsAndPreservesOwnershipEvidence(t *tes
 	runGit(t, repo, "-c", "user.name=Bandmaster Tests", "-c", "user.email=bandmaster@example.invalid", "commit", "-m", "Add owned fixture")
 	successfulSessionCommand(t, repo, "start")
 	task := successfulTaskCommand(t, repo, "create", "--title", "Submitted abort", "--intent", "Preserve evidence", "--expected-outcome", "Release only active locking")
-	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-submitted-abort")
+	assignment := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "agent-submitted-abort")
 	claimed := successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "owned.txt")
 	writeFile(t, filepath.Join(repo, "owned.txt"), "after\n")
 	if reviewed := runBandmaster(t, repo, "task", "diff", task.Result.ID, "--token", assignment.Result.AssignmentToken, "--json"); reviewed.exitCode != 0 {
@@ -414,7 +414,7 @@ func TestSessionAbortReleasesSubmittedClaimsAndPreservesOwnershipEvidence(t *tes
 		t.Fatalf("task was not submitted: %+v", submitted.Result)
 	}
 
-	aborted := runBandmaster(t, repo, "session", "abort", "--termination-confirmation", "worker handle exited", "--json")
+	aborted := runBandmaster(t, repo, "session", "abort", "--termination-confirmation", "agent handle exited", "--json")
 	if aborted.exitCode != 0 {
 		t.Fatalf("abort submitted task: exit=%d stdout=%s stderr=%s", aborted.exitCode, aborted.stdout, aborted.stderr)
 	}
@@ -483,17 +483,17 @@ func TestConcurrentDuplicateSessionTransitionIsIdempotent(t *testing.T) {
 	const processCount = 8
 	start := make(chan struct{})
 	results := make(chan concurrentCommandResult, processCount)
-	var workers sync.WaitGroup
+	var agents sync.WaitGroup
 	for range processCount {
-		workers.Add(1)
+		agents.Add(1)
 		go func() {
-			defer workers.Done()
+			defer agents.Done()
 			<-start
 			results <- runBandmasterConcurrently(repo, "session", "pause", "--json")
 		}()
 	}
 	close(start)
-	workers.Wait()
+	agents.Wait()
 	close(results)
 
 	for result := range results {
@@ -519,17 +519,17 @@ func TestConcurrentDuplicateSessionFinishCompletesChecksOnce(t *testing.T) {
 	const processCount = 4
 	start := make(chan struct{})
 	results := make(chan concurrentCommandResult, processCount)
-	var workers sync.WaitGroup
+	var agents sync.WaitGroup
 	for range processCount {
-		workers.Add(1)
+		agents.Add(1)
 		go func() {
-			defer workers.Done()
+			defer agents.Done()
 			<-start
 			results <- runBandmasterConcurrently(repo, "session", "finish", "--json")
 		}()
 	}
 	close(start)
-	workers.Wait()
+	agents.Wait()
 	close(results)
 	for result := range results {
 		if result.err != nil || result.exitCode != 0 {
@@ -657,7 +657,7 @@ func TestSessionStartEnforcesConfigurationAndCleanGitPreconditions(t *testing.T)
 func TestSecondSessionIsRejectedBeforeReevaluatingRepositoryState(t *testing.T) {
 	repo := approvedCleanRepository(t)
 	started := successfulSessionCommand(t, repo, "start")
-	writeFile(t, filepath.Join(repo, "worker-edit.txt"), "in progress\n")
+	writeFile(t, filepath.Join(repo, "agent-edit.txt"), "in progress\n")
 
 	response := assertSessionError(t, repo, "start", "session_already_active")
 	if response.SessionID != started.SessionID {
@@ -746,7 +746,7 @@ func successfulSessionCommand(t *testing.T, repo, action string) sessionResponse
 		t.Fatalf("session %s exit code = %d, stdout = %s, stderr = %s", action, result.exitCode, result.stdout, result.stderr)
 	}
 	response := decodeSessionResponse(t, result.stdout)
-	if !response.Success || response.SchemaVersion != "1" || response.Command != "session "+action {
+	if !response.Success || response.SchemaVersion != "2" || response.Command != "session "+action {
 		t.Fatalf("unexpected session %s response: %+v", action, response)
 	}
 	return response
@@ -759,7 +759,7 @@ func assertSessionError(t *testing.T, repo, action, wantCode string) sessionResp
 		t.Fatalf("session %s exit code = %d, want 3; stdout = %s; stderr = %s", action, result.exitCode, result.stdout, result.stderr)
 	}
 	response := decodeSessionResponse(t, result.stdout)
-	if response.Success || response.SchemaVersion != "1" || response.Error.Code != wantCode || response.Error.Retryable {
+	if response.Success || response.SchemaVersion != "2" || response.Error.Code != wantCode || response.Error.Retryable {
 		t.Fatalf("session %s error = %+v, want non-retryable %q", action, response, wantCode)
 	}
 	return response

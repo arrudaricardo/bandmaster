@@ -58,7 +58,7 @@ func TestInitGeneratesUnapprovedConfigAndCodexSkill(t *testing.T) {
 	if err := json.Unmarshal([]byte(result.stdout), &response); err != nil {
 		t.Fatalf("decode JSON response: %v\n%s", err, result.stdout)
 	}
-	if response.SchemaVersion != "1" || response.Command != "init" || !response.Success {
+	if response.SchemaVersion != "2" || response.Command != "init" || !response.Success {
 		t.Fatalf("unexpected response envelope: %+v", response)
 	}
 	if response.Result.ConfigPath != ".bandmaster.yaml" {
@@ -75,14 +75,14 @@ func TestInitGeneratesUnapprovedConfigAndCodexSkill(t *testing.T) {
 	}
 
 	config := readFile(t, filepath.Join(repo, ".bandmaster.yaml"))
-	for _, expected := range []string{"version: 1", "worker_lease_duration: 5m", "name: npm-test", "- npm", "- test"} {
+	for _, expected := range []string{"version: 2", "agent_lease_duration: 5m", "name: npm-test", "- npm", "- test"} {
 		if !strings.Contains(config, expected) {
 			t.Errorf("config does not contain %q:\n%s", expected, config)
 		}
 	}
 
 	skill := readFile(t, filepath.Join(repo, ".agents", "skills", "bandmaster", "SKILL.md"))
-	for _, expected := range []string{"name: bandmaster", "including a single task", "truly trivial change"} {
+	for _, expected := range []string{"name: bandmaster", "including a single Task", "truly trivial change"} {
 		if !strings.Contains(skill, expected) {
 			t.Errorf("generated skill does not contain %q:\n%s", expected, skill)
 		}
@@ -102,9 +102,9 @@ func TestInitGuidesValidationAroundTheFrozenBarrier(t *testing.T) {
 
 	skill := readFile(t, filepath.Join(repo, ".agents", "skills", "bandmaster", "SKILL.md"))
 	for _, expected := range []string{
-		"Workers run only focused checks scoped to their owned behavior while peers share the mutable working tree",
-		"A worker-observed repository-wide failure during concurrent package movement is diagnostic only, not an official batch result",
-		"Official repository-wide validation starts only after every batch member has stopped editing and the batch is frozen",
+		"Agents run only focused checks scoped to their owned behavior while peers share the mutable working tree",
+		"An Agent-observed repository-wide failure during concurrent package movement is diagnostic only, not an official Batch result",
+		"Official repository-wide validation starts only after that frozen barrier",
 		"Do not keep editing after submission or race the frozen barrier",
 		"After provisional commits, preserve the existing final validation stage",
 	} {
@@ -132,7 +132,7 @@ func TestTUIRejectsJSONModeWithStableError(t *testing.T) {
 	if err := json.Unmarshal([]byte(result.stdout), &response); err != nil {
 		t.Fatalf("decode TUI JSON rejection: %v\n%s", err, result.stdout)
 	}
-	if response.SchemaVersion != "1" || response.Command != "tui" || response.Success || response.Error.Code != "invalid_arguments" || response.Error.Retryable {
+	if response.SchemaVersion != "2" || response.Command != "tui" || response.Success || response.Error.Code != "invalid_arguments" || response.Error.Retryable {
 		t.Fatalf("unexpected TUI JSON rejection: %+v", response)
 	}
 }
@@ -161,7 +161,7 @@ func TestVersionProvidesHumanAndVersionedJSONOutput(t *testing.T) {
 	if err := json.Unmarshal([]byte(jsonResult.stdout), &response); err != nil {
 		t.Fatalf("decode version response: %v\n%s", err, jsonResult.stdout)
 	}
-	if response.SchemaVersion != "1" || response.Command != "version" || !response.Success || response.Result.Version != "dev" || response.Result.JSONSchemaVersion != "1" || response.Result.JSONSchemaCompatibility == "" {
+	if response.SchemaVersion != "2" || response.Command != "version" || !response.Success || response.Result.Version != "dev" || response.Result.JSONSchemaVersion != "2" || response.Result.JSONSchemaCompatibility == "" {
 		t.Fatalf("unexpected version response: %+v", response)
 	}
 }
@@ -227,7 +227,7 @@ func TestPrettyJSONOutputRequiresJSONAndUsesIndentation(t *testing.T) {
 	if pretty.exitCode != 0 {
 		t.Fatalf("pretty version exit code = %d, stderr = %s", pretty.exitCode, pretty.stderr)
 	}
-	if !strings.Contains(pretty.stdout, "\n  \"schema_version\": \"1\"") {
+	if !strings.Contains(pretty.stdout, "\n  \"schema_version\": \"2\"") {
 		t.Fatalf("pretty JSON is not indented:\n%s", pretty.stdout)
 	}
 	var response map[string]any
@@ -399,10 +399,10 @@ func TestInitPreservesProjectConfigAndOverwritesGeneratedSkill(t *testing.T) {
 	skill := readFile(t, skillPath)
 	for _, expected := range []string{
 		"name: bandmaster",
-		"including a single task",
+		"including a single Task",
 		"truly trivial change",
-		"parent Codex agent is the sole orchestrator",
-		"do not start workers or a replacement session automatically",
+		"Orchestrator Agent is the sole orchestrator",
+		"do not start Agents or a replacement Session automatically",
 		"bandmaster task claim <task-id> --token <token>",
 		"bandmaster task heartbeat <task-id> --token <token>",
 		"It must not run Git mutations",
@@ -422,7 +422,7 @@ func TestInitPreservesProjectConfigAndOverwritesGeneratedSkill(t *testing.T) {
 
 func TestConfigStatusRejectsInvalidVersionedConfiguration(t *testing.T) {
 	repo := newGitRepository(t)
-	writeFile(t, filepath.Join(repo, ".bandmaster.yaml"), "version: 2\nvalidation:\n  commands: []\n")
+	writeFile(t, filepath.Join(repo, ".bandmaster.yaml"), "version: 99\nvalidation:\n  commands: []\n")
 
 	result := runBandmaster(t, repo, "config", "status", "--json")
 	if result.exitCode != 3 {
@@ -446,7 +446,7 @@ func TestConfigStatusRejectsInvalidVersionedConfiguration(t *testing.T) {
 func TestConfigStatusRejectsAmbiguousOrEscapingConfiguration(t *testing.T) {
 	t.Run("trailing YAML document", func(t *testing.T) {
 		repo := newGitRepository(t)
-		writeFile(t, filepath.Join(repo, ".bandmaster.yaml"), "version: 1\nvalidation:\n  commands: []\n---\nversion: 1\nvalidation:\n  commands: []\n")
+		writeFile(t, filepath.Join(repo, ".bandmaster.yaml"), "version: 2\nvalidation:\n  commands: []\n---\nversion: 2\nvalidation:\n  commands: []\n")
 		assertConfigError(t, repo, "invalid_configuration")
 	})
 
@@ -456,7 +456,7 @@ func TestConfigStatusRejectsAmbiguousOrEscapingConfiguration(t *testing.T) {
 		if err := os.Symlink(outside, filepath.Join(repo, "outside")); err != nil {
 			t.Fatalf("create working-directory symlink: %v", err)
 		}
-		writeFile(t, filepath.Join(repo, ".bandmaster.yaml"), "version: 1\nvalidation:\n  commands:\n    - name: escaped\n      argv: [go, test, ./...]\n      working_directory: outside\n      timeout: 10m\n")
+		writeFile(t, filepath.Join(repo, ".bandmaster.yaml"), "version: 2\nvalidation:\n  commands:\n    - name: escaped\n      argv: [go, test, ./...]\n      working_directory: outside\n      timeout: 10m\n")
 		assertConfigError(t, repo, "invalid_configuration")
 	})
 }
@@ -578,7 +578,7 @@ func TestInitRejectsUnsupportedRepositoryLayoutsWithTypedErrors(t *testing.T) {
 			if err := json.Unmarshal([]byte(result.stdout), &response); err != nil {
 				t.Fatalf("decode error response: %v\n%s", err, result.stdout)
 			}
-			if response.SchemaVersion != "1" || response.Success || response.Error.Code != test.wantCode || response.Error.Message == "" || response.Error.Retryable {
+			if response.SchemaVersion != "2" || response.Success || response.Error.Code != test.wantCode || response.Error.Message == "" || response.Error.Retryable {
 				t.Fatalf("unexpected error response: %+v", response)
 			}
 		})
@@ -602,7 +602,7 @@ func TestInitRejectsProjectArtifactSymlinkEscape(t *testing.T) {
 			name: "configuration file",
 			setup: func(t *testing.T, repo, outside string) {
 				outsideConfig := filepath.Join(outside, "config.yaml")
-				writeFile(t, outsideConfig, "version: 1\nvalidation:\n  commands: []\n")
+				writeFile(t, outsideConfig, "version: 2\nvalidation:\n  commands: []\n")
 				if err := os.Symlink(outsideConfig, filepath.Join(repo, ".bandmaster.yaml")); err != nil {
 					t.Fatalf("create configuration symlink: %v", err)
 				}

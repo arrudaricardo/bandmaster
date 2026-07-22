@@ -191,8 +191,8 @@ func (p *Project) persistIntegrityViolations(session Session, observations []int
 }
 
 func quarantineTaskForIntegrity(tx *sql.Tx, sessionID string, violationID int64, taskID, now string) *Error {
-	var status, worker string
-	if err := tx.QueryRow(`SELECT status, COALESCE(worker_identity, '') FROM tasks WHERE id = ?`, taskID).Scan(&status, &worker); err != nil {
+	var status, agent string
+	if err := tx.QueryRow(`SELECT status, COALESCE(agent_identity, '') FROM tasks WHERE id = ?`, taskID).Scan(&status, &agent); err != nil {
 		return sessionInternal(sessionID, "read affected task", err)
 	}
 	if status == "quarantined" || status == "committed" || status == "no_op" || status == "canceled" {
@@ -204,7 +204,7 @@ func quarantineTaskForIntegrity(tx *sql.Tx, sessionID string, violationID int64,
 	if _, err := tx.Exec(`UPDATE tasks SET status = 'quarantined', updated_at = ? WHERE id = ?`, now, taskID); err != nil {
 		return sessionInternal(sessionID, "quarantine affected task", err)
 	}
-	if _, err := tx.Exec(`INSERT INTO task_audit_events(session_id, task_id, event, from_status, to_status, worker_identity, occurred_at) VALUES(?, ?, 'integrity_violation', ?, 'quarantined', ?, ?)`, sessionID, taskID, status, nullableString(worker), now); err != nil {
+	if _, err := tx.Exec(`INSERT INTO task_audit_events(session_id, task_id, event, from_status, to_status, agent_identity, occurred_at) VALUES(?, ?, 'integrity_violation', ?, 'quarantined', ?, ?)`, sessionID, taskID, status, nullableString(agent), now); err != nil {
 		return sessionInternal(sessionID, "audit task integrity quarantine", err)
 	}
 	return nil
@@ -249,7 +249,7 @@ func quarantineCurrentBatches(tx *sql.Tx, sessionID string, violationID int64, n
 		return sessionInternal(sessionID, "close affected batch scan", err)
 	}
 	for _, batchID := range batchIDs {
-		taskRows, err := tx.Query(`SELECT task_id FROM batch_members WHERE batch_id = ?`, batchID)
+		taskRows, err := tx.Query(`SELECT task_id FROM batch_tasks WHERE batch_id = ?`, batchID)
 		if err != nil {
 			return sessionInternal(sessionID, "inspect affected batch tasks", err)
 		}

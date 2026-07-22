@@ -82,7 +82,7 @@ func TestPreflightIsReadOnlyAndInitialClaimPersistsRegularFileBaselines(t *testi
 		"--intent", "Exercise ownership",
 		"--expected-outcome", "Baselines persist",
 	)
-	assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-claim")
+	assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "agent-claim")
 	args := []string{
 		"task", "preflight", task.Result.ID,
 		"--token", assigned.Result.AssignmentToken,
@@ -149,7 +149,7 @@ func TestInitialClaimRequiresTheOwningTokenAndGrantsNoPartialWriteSet(t *testing
 	runGit(t, repo, "-c", "user.name=Bandmaster Tests", "-c", "user.email=bandmaster@example.invalid", "commit", "-m", "Add ownership fixture")
 	successfulSessionCommand(t, repo, "start")
 	task := successfulTaskCommand(t, repo, "create", "--title", "Atomic claim", "--intent", "Own all paths", "--expected-outcome", "No partial ownership")
-	assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-atomic")
+	assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "agent-atomic")
 
 	stale := runBandmaster(t, repo, "task", "claim", task.Result.ID,
 		"--token", "assignment_stale",
@@ -184,7 +184,7 @@ func TestInitialClaimRequiresTheOwningTokenAndGrantsNoPartialWriteSet(t *testing
 	}
 
 	contender := successfulTaskCommand(t, repo, "create", "--title", "Conflicting claim", "--intent", "Test path conflicts", "--expected-outcome", "No partial nested claim")
-	contenderAssignment := successfulTaskCommand(t, repo, "assign", contender.Result.ID, "--worker", "worker-contender")
+	contenderAssignment := successfulTaskCommand(t, repo, "assign", contender.Result.ID, "--agent", "agent-contender")
 	conflict := runBandmaster(t, repo, "task", "claim", contender.Result.ID,
 		"--token", contenderAssignment.Result.AssignmentToken,
 		"--path", "free.txt",
@@ -193,7 +193,7 @@ func TestInitialClaimRequiresTheOwningTokenAndGrantsNoPartialWriteSet(t *testing
 	)
 	assertTaskError(t, conflict, 2, "claim_unavailable", true)
 	unchangedContender := successfulTaskCommand(t, repo, "inspect", contender.Result.ID)
-	if unchangedContender.Result.Status != "blocked" || unchangedContender.Result.WorkerIdentity != "" || unchangedContender.Result.AssignmentToken != "" || unchangedContender.Result.BatchID != "" || len(unchangedContender.Result.Claims) != 0 {
+	if unchangedContender.Result.Status != "blocked" || unchangedContender.Result.AgentIdentity != "" || unchangedContender.Result.AssignmentToken != "" || unchangedContender.Result.BatchID != "" || len(unchangedContender.Result.Claims) != 0 {
 		t.Fatalf("conflicting write set granted partial claims: %+v", unchangedContender.Result)
 	}
 	lastEvent := unchangedContender.Result.AuditHistory[len(unchangedContender.Result.AuditHistory)-1]
@@ -210,7 +210,7 @@ func TestInitialClaimRequiresTheOwningTokenAndGrantsNoPartialWriteSet(t *testing
 	assertTaskError(t, replan, 3, "task_core_frozen", false)
 }
 
-func TestSeparateWorkerProcessesAcquireDisjointClaimsConcurrently(t *testing.T) {
+func TestSeparateAgentProcessesAcquireDisjointClaimsConcurrently(t *testing.T) {
 	repo := approvedCleanRepository(t)
 	writeFile(t, filepath.Join(repo, "left.txt"), "left baseline\n")
 	writeFile(t, filepath.Join(repo, "right.txt"), "right baseline\n")
@@ -220,16 +220,16 @@ func TestSeparateWorkerProcessesAcquireDisjointClaimsConcurrently(t *testing.T) 
 
 	left := successfulTaskCommand(t, repo, "create", "--title", "Edit left", "--intent", "Change the left file", "--expected-outcome", "Left is owned")
 	right := successfulTaskCommand(t, repo, "create", "--title", "Edit right", "--intent", "Change the right file", "--expected-outcome", "Right is owned")
-	leftAssignment := successfulTaskCommand(t, repo, "assign", left.Result.ID, "--worker", "worker-left")
-	rightAssignment := successfulTaskCommand(t, repo, "assign", right.Result.ID, "--worker", "worker-right")
+	leftAssignment := successfulTaskCommand(t, repo, "assign", left.Result.ID, "--agent", "agent-left")
+	rightAssignment := successfulTaskCommand(t, repo, "assign", right.Result.ID, "--agent", "agent-right")
 
 	leftCommand := newBandmasterCommand(repo, "task", "claim", left.Result.ID, "--token", leftAssignment.Result.AssignmentToken, "--path", "left.txt", "--json")
 	rightCommand := newBandmasterCommand(repo, "task", "claim", right.Result.ID, "--token", rightAssignment.Result.AssignmentToken, "--path", "right.txt", "--json")
 	if err := leftCommand.command.Start(); err != nil {
-		t.Fatalf("start left worker: %v", err)
+		t.Fatalf("start left agent: %v", err)
 	}
 	if err := rightCommand.command.Start(); err != nil {
-		t.Fatalf("start right worker: %v", err)
+		t.Fatalf("start right agent: %v", err)
 	}
 	leftResult := waitBandmasterCommand(t, leftCommand)
 	rightResult := waitBandmasterCommand(t, rightCommand)
@@ -240,29 +240,29 @@ func TestSeparateWorkerProcessesAcquireDisjointClaimsConcurrently(t *testing.T) 
 	leftTask := decodeTaskResponse(t, leftResult.stdout)
 	rightTask := decodeTaskResponse(t, rightResult.stdout)
 	if leftTask.Result.Status != "editing" || rightTask.Result.Status != "editing" || leftTask.Result.BatchID == "" || leftTask.Result.BatchID != rightTask.Result.BatchID {
-		t.Fatalf("disjoint workers did not join one collecting batch: left=%+v right=%+v", leftTask.Result, rightTask.Result)
+		t.Fatalf("disjoint agents did not join one collecting batch: left=%+v right=%+v", leftTask.Result, rightTask.Result)
 	}
 	writeFile(t, filepath.Join(repo, "left.txt"), "left changed\n")
 	writeFile(t, filepath.Join(repo, "right.txt"), "right changed\n")
 	if diff := runBandmaster(t, repo, "task", "diff", left.Result.ID, "--token", leftAssignment.Result.AssignmentToken, "--json"); diff.exitCode != 0 {
-		t.Fatalf("left worker could not inspect its concurrent edit: %+v", diff)
+		t.Fatalf("left agent could not inspect its concurrent edit: %+v", diff)
 	}
 	if diff := runBandmaster(t, repo, "task", "diff", right.Result.ID, "--token", rightAssignment.Result.AssignmentToken, "--json"); diff.exitCode != 0 {
-		t.Fatalf("right worker could not inspect its concurrent edit: %+v", diff)
+		t.Fatalf("right agent could not inspect its concurrent edit: %+v", diff)
 	}
 }
 
-func TestConcurrentOverlappingClaimsLeaveOneBlockedWorkerClaimless(t *testing.T) {
+func TestConcurrentOverlappingClaimsLeaveOneBlockedAgentClaimless(t *testing.T) {
 	repo := approvedCleanRepository(t)
 	writeFile(t, filepath.Join(repo, "shared.txt"), "baseline\n")
 	runGit(t, repo, "add", "shared.txt")
 	runGit(t, repo, "-c", "user.name=Bandmaster Tests", "-c", "user.email=bandmaster@example.invalid", "commit", "-m", "Add overlapping claim fixture")
 	successfulSessionCommand(t, repo, "start")
 
-	first := successfulTaskCommand(t, repo, "create", "--title", "First contender", "--intent", "Claim shared path", "--expected-outcome", "One worker owns it")
-	second := successfulTaskCommand(t, repo, "create", "--title", "Second contender", "--intent", "Claim shared path", "--expected-outcome", "One worker blocks")
-	firstAssignment := successfulTaskCommand(t, repo, "assign", first.Result.ID, "--worker", "worker-first-overlap")
-	secondAssignment := successfulTaskCommand(t, repo, "assign", second.Result.ID, "--worker", "worker-second-overlap")
+	first := successfulTaskCommand(t, repo, "create", "--title", "First contender", "--intent", "Claim shared path", "--expected-outcome", "One agent owns it")
+	second := successfulTaskCommand(t, repo, "create", "--title", "Second contender", "--intent", "Claim shared path", "--expected-outcome", "One agent blocks")
+	firstAssignment := successfulTaskCommand(t, repo, "assign", first.Result.ID, "--agent", "agent-first-overlap")
+	secondAssignment := successfulTaskCommand(t, repo, "assign", second.Result.ID, "--agent", "agent-second-overlap")
 
 	firstCommand := newBandmasterCommand(repo, "task", "claim", first.Result.ID, "--token", firstAssignment.Result.AssignmentToken, "--path", "first-free.txt", "--path", "shared.txt", "--json")
 	secondCommand := newBandmasterCommand(repo, "task", "claim", second.Result.ID, "--token", secondAssignment.Result.AssignmentToken, "--path", "second-free.txt", "--path", "shared.txt", "--json")
@@ -311,7 +311,7 @@ func TestClaimExpansionReleaseAndBlockedTaskRequeuePreserveOwnership(t *testing.
 	successfulSessionCommand(t, repo, "start")
 
 	owner := successfulTaskCommand(t, repo, "create", "--title", "Own paths", "--intent", "Exercise expansion", "--expected-outcome", "Claims stay atomic")
-	ownerAssignment := successfulTaskCommand(t, repo, "assign", owner.Result.ID, "--worker", "worker-owner")
+	ownerAssignment := successfulTaskCommand(t, repo, "assign", owner.Result.ID, "--agent", "agent-owner")
 	successfulTaskCommand(t, repo, "claim", owner.Result.ID, "--token", ownerAssignment.Result.AssignmentToken, "--path", "owned.txt")
 	expanded := successfulTaskCommand(t, repo, "claim", owner.Result.ID,
 		"--token", ownerAssignment.Result.AssignmentToken,
@@ -323,7 +323,7 @@ func TestClaimExpansionReleaseAndBlockedTaskRequeuePreserveOwnership(t *testing.
 	}
 
 	busyOwner := successfulTaskCommand(t, repo, "create", "--title", "Own busy path", "--intent", "Create contention", "--expected-outcome", "Busy path is unavailable")
-	busyAssignment := successfulTaskCommand(t, repo, "assign", busyOwner.Result.ID, "--worker", "worker-busy")
+	busyAssignment := successfulTaskCommand(t, repo, "assign", busyOwner.Result.ID, "--agent", "agent-busy")
 	successfulTaskCommand(t, repo, "claim", busyOwner.Result.ID, "--token", busyAssignment.Result.AssignmentToken, "--path", "busy.txt")
 
 	failedExpansion := runBandmaster(t, repo, "task", "claim", owner.Result.ID,
@@ -354,7 +354,7 @@ func TestClaimExpansionReleaseAndBlockedTaskRequeuePreserveOwnership(t *testing.
 	}
 
 	blockedTask := successfulTaskCommand(t, repo, "create", "--title", "Wait for busy path", "--intent", "Retry after release", "--expected-outcome", "Requeue succeeds")
-	blockedAssignment := successfulTaskCommand(t, repo, "assign", blockedTask.Result.ID, "--worker", "worker-blocked")
+	blockedAssignment := successfulTaskCommand(t, repo, "assign", blockedTask.Result.ID, "--agent", "agent-blocked")
 	blockedClaim := runBandmaster(t, repo, "task", "claim", blockedTask.Result.ID,
 		"--token", blockedAssignment.Result.AssignmentToken,
 		"--path", "available-after-requeue.txt",
@@ -367,7 +367,7 @@ func TestClaimExpansionReleaseAndBlockedTaskRequeuePreserveOwnership(t *testing.
 	if requeued.Result.Status != "ready" || requeued.Result.AssignmentToken != "" || len(requeued.Result.Claims) != 0 {
 		t.Fatalf("blocked task was not returned claimless to ready: %+v", requeued.Result)
 	}
-	reassigned := successfulTaskCommand(t, repo, "assign", blockedTask.Result.ID, "--worker", "worker-requeued")
+	reassigned := successfulTaskCommand(t, repo, "assign", blockedTask.Result.ID, "--agent", "agent-requeued")
 	if reassigned.Result.AssignmentToken == "" || reassigned.Result.AssignmentToken == blockedAssignment.Result.AssignmentToken {
 		t.Fatalf("requeued task did not receive a fresh token: old=%q new=%q", blockedAssignment.Result.AssignmentToken, reassigned.Result.AssignmentToken)
 	}
@@ -381,14 +381,14 @@ func TestClaimExpansionReleaseAndBlockedTaskRequeuePreserveOwnership(t *testing.
 	}
 }
 
-func TestWorkerActionsRenewLeasesAndExplicitHeartbeatSupportsLongEdits(t *testing.T) {
+func TestAgentActionsRenewLeasesAndExplicitHeartbeatSupportsLongEdits(t *testing.T) {
 	repo := approvedCleanRepository(t)
 	writeFile(t, filepath.Join(repo, "leased.txt"), "baseline\n")
 	runGit(t, repo, "add", "leased.txt")
 	runGit(t, repo, "-c", "user.name=Bandmaster Tests", "-c", "user.email=bandmaster@example.invalid", "commit", "-m", "Add lease fixture")
 	successfulSessionCommand(t, repo, "start")
 	task := successfulTaskCommand(t, repo, "create", "--title", "Lease work", "--intent", "Keep ownership active", "--expected-outcome", "Every action renews")
-	assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-lease")
+	assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "agent-lease")
 	if assigned.Result.Lease == nil || assigned.Result.Lease.Status != "active" || assigned.Result.Lease.RenewedAt == "" || assigned.Result.Lease.ExpiresAt == "" {
 		t.Fatalf("assignment did not create an active lease: %+v", assigned.Result.Lease)
 	}
@@ -400,19 +400,19 @@ func TestWorkerActionsRenewLeasesAndExplicitHeartbeatSupportsLongEdits(t *testin
 	}
 	afterPreflight := successfulTaskCommand(t, repo, "inspect", task.Result.ID)
 	if afterPreflight.Result.Lease == nil || afterPreflight.Result.Lease.RenewedAt <= assigned.Result.Lease.RenewedAt {
-		t.Fatalf("preflight did not renew the worker lease: before=%+v after=%+v", assigned.Result.Lease, afterPreflight.Result.Lease)
+		t.Fatalf("preflight did not renew the agent lease: before=%+v after=%+v", assigned.Result.Lease, afterPreflight.Result.Lease)
 	}
 
 	time.Sleep(10 * time.Millisecond)
 	claimed := successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assigned.Result.AssignmentToken, "--path", "leased.txt")
 	if claimed.Result.Lease == nil || claimed.Result.Lease.RenewedAt <= afterPreflight.Result.Lease.RenewedAt {
-		t.Fatalf("claim did not renew the worker lease: before=%+v after=%+v", afterPreflight.Result.Lease, claimed.Result.Lease)
+		t.Fatalf("claim did not renew the agent lease: before=%+v after=%+v", afterPreflight.Result.Lease, claimed.Result.Lease)
 	}
 
 	time.Sleep(10 * time.Millisecond)
 	heartbeat := successfulTaskCommand(t, repo, "heartbeat", task.Result.ID, "--token", assigned.Result.AssignmentToken)
 	if heartbeat.Result.Lease == nil || heartbeat.Result.Lease.Status != "active" || heartbeat.Result.Lease.RenewedAt <= claimed.Result.Lease.RenewedAt {
-		t.Fatalf("explicit heartbeat did not renew the worker lease: before=%+v after=%+v", claimed.Result.Lease, heartbeat.Result.Lease)
+		t.Fatalf("explicit heartbeat did not renew the agent lease: before=%+v after=%+v", claimed.Result.Lease, heartbeat.Result.Lease)
 	}
 
 	writeFile(t, filepath.Join(repo, "leased.txt"), "changed\n")
@@ -422,7 +422,7 @@ func TestWorkerActionsRenewLeasesAndExplicitHeartbeatSupportsLongEdits(t *testin
 	}
 	afterDiff := successfulTaskCommand(t, repo, "inspect", task.Result.ID)
 	if afterDiff.Result.Lease == nil || afterDiff.Result.Lease.RenewedAt <= heartbeat.Result.Lease.RenewedAt {
-		t.Fatalf("diff did not renew the worker lease: before=%+v after=%+v", heartbeat.Result.Lease, afterDiff.Result.Lease)
+		t.Fatalf("diff did not renew the agent lease: before=%+v after=%+v", heartbeat.Result.Lease, afterDiff.Result.Lease)
 	}
 }
 
@@ -433,7 +433,7 @@ func TestExpiredLeaseQuarantinesClaimsUntilAuditedRecoveryAndReplacement(t *test
 	runGit(t, repo, "-c", "user.name=Bandmaster Tests", "-c", "user.email=bandmaster@example.invalid", "commit", "-m", "Add quarantine fixture")
 	successfulSessionCommand(t, repo, "start")
 	owner := successfulTaskCommand(t, repo, "create", "--title", "Quarantine work", "--intent", "Retain abandoned ownership", "--expected-outcome", "Replacement inherits claims")
-	assignment := successfulTaskCommand(t, repo, "assign", owner.Result.ID, "--worker", "worker-expiring")
+	assignment := successfulTaskCommand(t, repo, "assign", owner.Result.ID, "--agent", "agent-expiring")
 	claimed := successfulTaskCommand(t, repo, "claim", owner.Result.ID, "--token", assignment.Result.AssignmentToken, "--path", "quarantined.txt")
 	writeFile(t, filepath.Join(repo, "quarantined.txt"), "partial edit\n")
 
@@ -444,7 +444,7 @@ func TestExpiredLeaseQuarantinesClaimsUntilAuditedRecoveryAndReplacement(t *test
 	if wait := time.Until(expiresAt) + 150*time.Millisecond; wait > 0 {
 		time.Sleep(wait)
 	}
-	expiredAssignment := runBandmaster(t, repo, "task", "assign", owner.Result.ID, "--worker", "worker-expiring", "--json")
+	expiredAssignment := runBandmaster(t, repo, "task", "assign", owner.Result.ID, "--agent", "agent-expiring", "--json")
 	assertTaskError(t, expiredAssignment, 4, "lease_expired", false)
 	quarantined := successfulTaskCommand(t, repo, "inspect", owner.Result.ID)
 	if quarantined.Result.Status != "quarantined" || quarantined.Result.Lease == nil || quarantined.Result.Lease.Status != "expired" || len(quarantined.Result.Claims) != 1 || quarantined.Result.Claims[0].Baseline.Presence != "present" {
@@ -452,28 +452,28 @@ func TestExpiredLeaseQuarantinesClaimsUntilAuditedRecoveryAndReplacement(t *test
 	}
 
 	contender := successfulTaskCommand(t, repo, "create", "--title", "Contend after expiry", "--intent", "Prove quarantine remains exclusive", "--expected-outcome", "Claim stays unavailable")
-	contenderAssignment := successfulTaskCommand(t, repo, "assign", contender.Result.ID, "--worker", "worker-contender-after-expiry")
+	contenderAssignment := successfulTaskCommand(t, repo, "assign", contender.Result.ID, "--agent", "agent-contender-after-expiry")
 	contention := runBandmaster(t, repo, "task", "claim", contender.Result.ID, "--token", contenderAssignment.Result.AssignmentToken, "--path", "quarantined.txt", "--json")
 	assertTaskError(t, contention, 2, "claim_unavailable", true)
 
 	missingEvidence := runBandmaster(t, repo, "task", "recover", owner.Result.ID, "--json")
-	assertTaskError(t, missingEvidence, 3, "worker_termination_required", false)
-	wrongWorker := runBandmaster(t, repo, "task", "recover", owner.Result.ID, "--terminated-worker", "worker-other", "--termination-proof", "stopped", "--json")
-	assertTaskError(t, wrongWorker, 3, "worker_termination_mismatch", false)
+	assertTaskError(t, missingEvidence, 3, "agent_termination_required", false)
+	wrongAgent := runBandmaster(t, repo, "task", "recover", owner.Result.ID, "--terminated-agent", "agent-other", "--termination-proof", "stopped", "--json")
+	assertTaskError(t, wrongAgent, 3, "agent_termination_mismatch", false)
 	recovered := successfulTaskCommand(t, repo, "recover", owner.Result.ID,
-		"--user-confirmation", "I confirmed worker-expiring is no longer running",
-		"--diagnosis", "the worker lease expired with partial edits",
+		"--user-confirmation", "I confirmed agent-expiring is no longer running",
+		"--diagnosis", "the agent lease expired with partial edits",
 		"--intended-repair", "continue the retained partial edit",
 	)
 	if recovered.Result.Status != "repair_pending" || recovered.Result.AssignmentToken != "" || len(recovered.Result.Claims) != 1 {
-		t.Fatalf("audited recovery did not retain claims without worker authority: %+v", recovered.Result)
+		t.Fatalf("audited recovery did not retain claims without agent authority: %+v", recovered.Result)
 	}
 	recoveryEvent := recovered.Result.AuditHistory[len(recovered.Result.AuditHistory)-1]
-	if recoveryEvent.Event != "task_recovered" || recoveryEvent.RecoveryMethod != "user_confirmation" || recoveryEvent.UserConfirmation != "I confirmed worker-expiring is no longer running" || recoveryEvent.Diagnosis == "" || recoveryEvent.IntendedRepair == "" || len(recoveryEvent.RepairSnapshots) != 1 {
+	if recoveryEvent.Event != "task_recovered" || recoveryEvent.RecoveryMethod != "user_confirmation" || recoveryEvent.UserConfirmation != "I confirmed agent-expiring is no longer running" || recoveryEvent.Diagnosis == "" || recoveryEvent.IntendedRepair == "" || len(recoveryEvent.RepairSnapshots) != 1 {
 		t.Fatalf("user recovery confirmation was not audited: %+v", recoveryEvent)
 	}
 
-	replacement := successfulTaskCommand(t, repo, "assign", owner.Result.ID, "--worker", "worker-replacement")
+	replacement := successfulTaskCommand(t, repo, "assign", owner.Result.ID, "--agent", "agent-replacement")
 	if replacement.Result.Status != "editing" || replacement.Result.AssignmentToken == "" || replacement.Result.AssignmentToken == assignment.Result.AssignmentToken || len(replacement.Result.Claims) != 1 || replacement.Result.Claims[0].Baseline.ContentHash != claimed.Result.Claims[0].Baseline.ContentHash {
 		t.Fatalf("replacement did not inherit retained ownership with a new token: old=%+v new=%+v", assignment.Result, replacement.Result)
 	}
@@ -497,18 +497,18 @@ func TestExpiredLeaseQuarantinesClaimsUntilAuditedRecoveryAndReplacement(t *test
 	expiredReplacement := runBandmaster(t, repo, "task", "heartbeat", owner.Result.ID, "--token", replacement.Result.AssignmentToken, "--json")
 	assertTaskError(t, expiredReplacement, 4, "lease_expired", false)
 	handleRecovered := successfulTaskCommand(t, repo, "recover", owner.Result.ID,
-		"--terminated-worker", "worker-replacement",
-		"--termination-proof", "codex-handle-worker-replacement-stopped",
+		"--terminated-agent", "agent-replacement",
+		"--termination-proof", "codex-handle-agent-replacement-stopped",
 		"--diagnosis", "the replacement lease expired before completion",
 		"--intended-repair", "finish the same retained owned path",
 	)
 	handleEvent := handleRecovered.Result.AuditHistory[len(handleRecovered.Result.AuditHistory)-1]
-	if handleRecovered.Result.Status != "repair_pending" || handleEvent.RecoveryMethod != "worker_handle" || handleEvent.TerminationProof != "codex-handle-worker-replacement-stopped" {
-		t.Fatalf("worker-handle recovery was not audited: task=%+v event=%+v", handleRecovered.Result, handleEvent)
+	if handleRecovered.Result.Status != "repair_pending" || handleEvent.RecoveryMethod != "agent_handle" || handleEvent.TerminationProof != "codex-handle-agent-replacement-stopped" {
+		t.Fatalf("agent-handle recovery was not audited: task=%+v event=%+v", handleRecovered.Result, handleEvent)
 	}
-	secondReplacement := successfulTaskCommand(t, repo, "assign", owner.Result.ID, "--worker", "worker-second-replacement")
+	secondReplacement := successfulTaskCommand(t, repo, "assign", owner.Result.ID, "--agent", "agent-second-replacement")
 	if secondReplacement.Result.AssignmentToken == "" || secondReplacement.Result.AssignmentToken == replacement.Result.AssignmentToken || len(secondReplacement.Result.Claims) != 1 {
-		t.Fatalf("worker-handle recovery did not create a safe replacement: %+v", secondReplacement.Result)
+		t.Fatalf("agent-handle recovery did not create a safe replacement: %+v", secondReplacement.Result)
 	}
 }
 
@@ -522,7 +522,7 @@ func approvedCleanRepositoryWithLeaseDuration(t *testing.T, duration string) str
 	}
 	configPath := filepath.Join(repo, ".bandmaster.yaml")
 	config := readFile(t, configPath)
-	writeFile(t, configPath, strings.Replace(config, "worker_lease_duration: 5m", "worker_lease_duration: "+duration, 1))
+	writeFile(t, configPath, strings.Replace(config, "agent_lease_duration: 5m", "agent_lease_duration: "+duration, 1))
 	runGit(t, repo, "add", ".")
 	runGit(t, repo, "-c", "user.name=Bandmaster Tests", "-c", "user.email=bandmaster@example.invalid", "commit", "-m", "Initialize project")
 	status := runBandmaster(t, repo, "config", "status", "--json")
@@ -574,7 +574,7 @@ func TestDiffReviewsEveryClaimFromBaselineAndRejectsUnownedChanges(t *testing.T)
 	runGit(t, repo, "-c", "user.name=Bandmaster Tests", "-c", "user.email=bandmaster@example.invalid", "commit", "-m", "Add diff fixture")
 	successfulSessionCommand(t, repo, "start")
 	task := successfulTaskCommand(t, repo, "create", "--title", "Review diff", "--intent", "Inspect owned changes", "--expected-outcome", "Complete path review")
-	assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-diff")
+	assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "agent-diff")
 	successfulTaskCommand(t, repo, "claim", task.Result.ID,
 		"--token", assigned.Result.AssignmentToken,
 		"--path", "cmd/tool.sh",
@@ -633,7 +633,7 @@ func TestSymlinkClaimsSnapshotTargetsAndFreezeSubmittedChanges(t *testing.T) {
 	runGit(t, repo, "-c", "user.name=Bandmaster Tests", "-c", "user.email=bandmaster@example.invalid", "commit", "-m", "Add symlink fixture")
 	successfulSessionCommand(t, repo, "start")
 	task := successfulTaskCommand(t, repo, "create", "--title", "Update symlinks", "--intent", "Track exact link targets", "--expected-outcome", "Symlink snapshots are frozen")
-	assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-symlink")
+	assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "agent-symlink")
 
 	claimed := successfulTaskCommand(t, repo, "claim", task.Result.ID,
 		"--token", assigned.Result.AssignmentToken,
@@ -710,7 +710,7 @@ func TestClaimsCoverCreationDeletionRenameAndExecutableChanges(t *testing.T) {
 		runGit(t, repo, "-c", "user.name=Bandmaster Tests", "-c", "user.email=bandmaster@example.invalid", "commit", "-m", "Add path transition fixtures")
 		successfulSessionCommand(t, repo, "start")
 		task := successfulTaskCommand(t, repo, "create", "--title", "Change paths", "--intent", "Exercise Git path transitions", "--expected-outcome", "Every path is attributable")
-		assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-path-transitions")
+		assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "agent-path-transitions")
 		successfulTaskCommand(t, repo, "claim", task.Result.ID,
 			"--token", assigned.Result.AssignmentToken,
 			"--path", "created.txt",
@@ -766,7 +766,7 @@ func TestClaimsCoverCreationDeletionRenameAndExecutableChanges(t *testing.T) {
 		runGit(t, repo, "-c", "user.name=Bandmaster Tests", "-c", "user.email=bandmaster@example.invalid", "commit", "-m", "Add rename fixture")
 		successfulSessionCommand(t, repo, "start")
 		task := successfulTaskCommand(t, repo, "create", "--title", "Incomplete rename", "--intent", "Prove both claims are required", "--expected-outcome", "Unowned destination is rejected")
-		assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-incomplete-rename")
+		assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "agent-incomplete-rename")
 		successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assigned.Result.AssignmentToken, "--path", "source.txt")
 		if err := os.Rename(filepath.Join(repo, "source.txt"), filepath.Join(repo, "destination.txt")); err != nil {
 			t.Fatalf("rename fixture: %v", err)
@@ -788,7 +788,7 @@ func TestClaimsCoverCreationDeletionRenameAndExecutableChanges(t *testing.T) {
 		runGit(t, repo, "config", "core.fileMode", "false")
 		successfulSessionCommand(t, repo, "start")
 		task := successfulTaskCommand(t, repo, "create", "--title", "Respect Git fileMode", "--intent", "Snapshot Git-visible modes", "--expected-outcome", "Ignored filesystem mode drift is unchanged")
-		assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-filemode")
+		assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "agent-filemode")
 		claimed := successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assigned.Result.AssignmentToken, "--path", "tracked-tool.sh")
 		if !claimed.Result.Claims[0].Baseline.Executable {
 			t.Fatalf("tracked executable index mode was not captured: %+v", claimed.Result.Claims[0])
@@ -831,7 +831,7 @@ func TestClaimPathsHonorGitSpellingAndFilesystemAliases(t *testing.T) {
 			aliases := sameFilesystemObject(filepath.Join(repo, test.tracked), filepath.Join(repo, test.alternate))
 			successfulSessionCommand(t, repo, "start")
 			task := successfulTaskCommand(t, repo, "create", "--title", "Claim alternate spelling", "--intent", "Use canonical path identity", "--expected-outcome", "Aliases are rejected")
-			assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-spelling")
+			assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "agent-spelling")
 
 			result := runBandmaster(t, repo, "task", "claim", task.Result.ID, "--token", assigned.Result.AssignmentToken, "--path", test.alternate, "--json")
 			if aliases {
@@ -855,7 +855,7 @@ func TestClaimPathsHonorGitSpellingAndFilesystemAliases(t *testing.T) {
 			aliases := sameFilesystemObject(filepath.Join(repo, test.tracked), filepath.Join(repo, test.alternate))
 			successfulSessionCommand(t, repo, "start")
 			task := successfulTaskCommand(t, repo, "create", "--title", "Claim absent spellings", "--intent", "Resolve destination identity", "--expected-outcome", "Only distinct destinations are claimable")
-			assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-absent-alias")
+			assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "agent-absent-alias")
 
 			result := runBandmaster(t, repo, "task", "claim", task.Result.ID,
 				"--token", assigned.Result.AssignmentToken,
@@ -898,10 +898,10 @@ func TestClaimPathsHonorGitSpellingAndFilesystemAliases(t *testing.T) {
 		}
 		for _, pair := range pairs {
 			owner := successfulTaskCommand(t, repo, "create", "--title", "Own "+pair.name+" path", "--intent", "Reserve an absent destination", "--expected-outcome", "Alias remains unavailable")
-			ownerAssignment := successfulTaskCommand(t, repo, "assign", owner.Result.ID, "--worker", "worker-owner-"+pair.name)
+			ownerAssignment := successfulTaskCommand(t, repo, "assign", owner.Result.ID, "--agent", "agent-owner-"+pair.name)
 			successfulTaskCommand(t, repo, "claim", owner.Result.ID, "--token", ownerAssignment.Result.AssignmentToken, "--path", pair.left)
 			contender := successfulTaskCommand(t, repo, "create", "--title", "Contend for "+pair.name+" path", "--intent", "Test persisted alias ownership", "--expected-outcome", "Alias contention is atomic")
-			contenderAssignment := successfulTaskCommand(t, repo, "assign", contender.Result.ID, "--worker", "worker-contender-"+pair.name)
+			contenderAssignment := successfulTaskCommand(t, repo, "assign", contender.Result.ID, "--agent", "agent-contender-"+pair.name)
 			result := runBandmaster(t, repo, "task", "claim", contender.Result.ID, "--token", contenderAssignment.Result.AssignmentToken, "--path", pair.right, "--json")
 			if pair.aliases {
 				assertTaskError(t, result, 2, "claim_unavailable", true)
@@ -919,7 +919,7 @@ func TestClaimPathsRejectTraversalDirectoriesRepositoriesAndUnsupportedTypes(t *
 		repo := approvedCleanRepository(t)
 		successfulSessionCommand(t, repo, "start")
 		task := successfulTaskCommand(t, repo, "create", "--title", "Reject invalid paths", "--intent", "Keep claims in the worktree", "--expected-outcome", "Invalid paths are rejected")
-		assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-invalid-paths")
+		assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "agent-invalid-paths")
 		for _, claimPath := range []string{"../outside.txt", "/absolute.txt", "nested//file.txt", "nested/./file.txt", `nested\file.txt`, ".git/config", "new/.git/config"} {
 			result := runBandmaster(t, repo, "task", "preflight", task.Result.ID, "--token", assigned.Result.AssignmentToken, "--path", claimPath, "--json")
 			assertTaskError(t, result, 3, "invalid_claim_path", false)
@@ -931,7 +931,7 @@ func TestClaimPathsRejectTraversalDirectoriesRepositoriesAndUnsupportedTypes(t *
 		aliasesGitMetadata := sameFilesystemObject(filepath.Join(repo, ".git"), filepath.Join(repo, ".GIT"))
 		successfulSessionCommand(t, repo, "start")
 		task := successfulTaskCommand(t, repo, "create", "--title", "Reject Git alias", "--intent", "Keep metadata outside claims", "--expected-outcome", "Only real metadata aliases are rejected")
-		assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-git-alias")
+		assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "agent-git-alias")
 		result := runBandmaster(t, repo, "task", "claim", task.Result.ID, "--token", assigned.Result.AssignmentToken, "--path", ".GIT/config", "--json")
 		if aliasesGitMetadata {
 			assertTaskError(t, result, 3, "invalid_claim_path", false)
@@ -952,7 +952,7 @@ func TestClaimPathsRejectTraversalDirectoriesRepositoriesAndUnsupportedTypes(t *
 		runGit(t, repo, "-c", "user.name=Bandmaster Tests", "-c", "user.email=bandmaster@example.invalid", "commit", "-m", "Add path safety fixture")
 		successfulSessionCommand(t, repo, "start")
 		task := successfulTaskCommand(t, repo, "create", "--title", "Reject unsafe objects", "--intent", "Avoid traversal", "--expected-outcome", "Unsafe objects are rejected")
-		assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-unsafe-objects")
+		assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "agent-unsafe-objects")
 
 		for _, claimPath := range []string{".agents", "escape/outside.txt"} {
 			result := runBandmaster(t, repo, "task", "preflight", task.Result.ID, "--token", assigned.Result.AssignmentToken, "--path", claimPath, "--json")
@@ -979,7 +979,7 @@ func TestClaimPathsRejectTraversalDirectoriesRepositoriesAndUnsupportedTypes(t *
 		repo := approvedCleanRepository(t)
 		successfulSessionCommand(t, repo, "start")
 		task := successfulTaskCommand(t, repo, "create", "--title", "Reject named pipe", "--intent", "Keep snapshots complete", "--expected-outcome", "Unsupported types are rejected")
-		assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--worker", "worker-named-pipe")
+		assigned := successfulTaskCommand(t, repo, "assign", task.Result.ID, "--agent", "agent-named-pipe")
 		successfulTaskCommand(t, repo, "claim", task.Result.ID, "--token", assigned.Result.AssignmentToken, "--path", "events.pipe")
 		if err := syscall.Mkfifo(filepath.Join(repo, "events.pipe"), 0o600); err != nil {
 			t.Fatalf("create named pipe: %v", err)
@@ -1006,7 +1006,7 @@ func TestSubmissionFreezesStructuredChangedAndPendingNoOpSnapshots(t *testing.T)
 	startingHead := strings.TrimSpace(runGit(t, repo, "rev-parse", "HEAD"))
 
 	changedTask := successfulTaskCommand(t, repo, "create", "--title", "Changed submission", "--intent", "Freeze edits", "--expected-outcome", "Changed snapshot persists")
-	changedAssignment := successfulTaskCommand(t, repo, "assign", changedTask.Result.ID, "--worker", "worker-submit-changed")
+	changedAssignment := successfulTaskCommand(t, repo, "assign", changedTask.Result.ID, "--agent", "agent-submit-changed")
 	successfulTaskCommand(t, repo, "claim", changedTask.Result.ID, "--token", changedAssignment.Result.AssignmentToken, "--path", "changed.txt")
 	writeFile(t, filepath.Join(repo, "changed.txt"), "after\n")
 	writeFile(t, filepath.Join(repo, "unclaimed.txt"), "outside ownership\n")
@@ -1088,7 +1088,7 @@ func TestSubmissionFreezesStructuredChangedAndPendingNoOpSnapshots(t *testing.T)
 	successfulSessionCommand(t, noOpRepo, "start")
 	noOpHead := strings.TrimSpace(runGit(t, noOpRepo, "rev-parse", "HEAD"))
 	noOpTask := successfulTaskCommand(t, noOpRepo, "create", "--title", "No-op submission", "--intent", "Record no change", "--expected-outcome", "No empty commit")
-	noOpAssignment := successfulTaskCommand(t, noOpRepo, "assign", noOpTask.Result.ID, "--worker", "worker-submit-noop")
+	noOpAssignment := successfulTaskCommand(t, noOpRepo, "assign", noOpTask.Result.ID, "--agent", "agent-submit-noop")
 	successfulTaskCommand(t, noOpRepo, "claim", noOpTask.Result.ID, "--token", noOpAssignment.Result.AssignmentToken, "--path", "unchanged.txt")
 	if reviewed := runBandmaster(t, noOpRepo, "task", "diff", noOpTask.Result.ID, "--token", noOpAssignment.Result.AssignmentToken, "--json"); reviewed.exitCode != 0 {
 		t.Fatalf("review no-op diff: exit=%d stdout=%s stderr=%s", reviewed.exitCode, reviewed.stdout, reviewed.stderr)

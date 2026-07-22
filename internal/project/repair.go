@@ -10,7 +10,7 @@ import (
 )
 
 type RepairRequest struct {
-	TerminatedWorker string
+	TerminatedAgent  string
 	TerminationProof string
 	UserConfirmation string
 	Diagnosis        string
@@ -21,8 +21,8 @@ func (p *Project) RepairTask(id string, request RepairRequest) (Task, *Error) {
 	if strings.TrimSpace(request.Diagnosis) == "" || strings.TrimSpace(request.IntendedRepair) == "" {
 		return Task{}, invalid("invalid_repair_handoff", "Repair diagnosis and intended repair must not be empty.")
 	}
-	if strings.TrimSpace(request.UserConfirmation) != "" && (strings.TrimSpace(request.TerminatedWorker) != "" || strings.TrimSpace(request.TerminationProof) != "") {
-		return Task{}, invalid("conflicting_recovery_evidence", "Use either worker-handle termination evidence or explicit user confirmation, not both.")
+	if strings.TrimSpace(request.UserConfirmation) != "" && (strings.TrimSpace(request.TerminatedAgent) != "" || strings.TrimSpace(request.TerminationProof) != "") {
+		return Task{}, invalid("conflicting_recovery_evidence", "Use either agent-handle termination evidence or explicit user confirmation, not both.")
 	}
 
 	db, projectError := p.openState()
@@ -40,13 +40,13 @@ func (p *Project) RepairTask(id string, request RepairRequest) (Task, *Error) {
 		return Task{}, projectError
 	}
 
-	var status, workerIdentity, batchID, batchStatus string
+	var status, agentIdentity, batchID, batchStatus string
 	err = tx.QueryRow(`
-		SELECT task.status, COALESCE(task.worker_identity, ''), batch.id, batch.status
+		SELECT task.status, COALESCE(task.agent_identity, ''), batch.id, batch.status
 		FROM tasks task
-		JOIN batch_members member ON member.task_id = task.id
-		JOIN batches batch ON batch.id = member.batch_id
-		WHERE task.session_id = ? AND task.id = ?`, session.ID, id).Scan(&status, &workerIdentity, &batchID, &batchStatus)
+		JOIN batch_tasks batch_task ON batch_task.task_id = task.id
+		JOIN batches batch ON batch.id = batch_task.batch_id
+		WHERE task.session_id = ? AND task.id = ?`, session.ID, id).Scan(&status, &agentIdentity, &batchID, &batchStatus)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Task{}, invalidSession(session.ID, "task_not_found", fmt.Sprintf("Task %s does not exist or has no retained ownership in the active session.", id))
 	}
@@ -57,21 +57,21 @@ func (p *Project) RepairTask(id string, request RepairRequest) (Task, *Error) {
 		return Task{}, invalidSession(session.ID, "task_not_repairable", fmt.Sprintf("Task %s cannot be repaired from %s state.", id, status))
 	}
 	if status == "editing" && batchStatus != "collecting" && batchStatus != "repairing" {
-		return Task{}, invalidSession(session.ID, "batch_not_repairable", fmt.Sprintf("Task %s cannot report worker failure while batch %s is %s.", id, batchID, batchStatus))
+		return Task{}, invalidSession(session.ID, "batch_not_repairable", fmt.Sprintf("Task %s cannot report agent failure while batch %s is %s.", id, batchID, batchStatus))
 	}
 	if status == "submitted" && batchStatus != "repair_pending" && batchStatus != "repairing" {
 		return Task{}, invalidSession(session.ID, "batch_not_repairable", fmt.Sprintf("Submitted task %s can be reopened only after its batch requires repair.", id))
 	}
 
-	recoveryMethod := "worker_handle"
+	recoveryMethod := "agent_handle"
 	if strings.TrimSpace(request.UserConfirmation) != "" {
 		recoveryMethod = "user_confirmation"
-	} else if strings.TrimSpace(request.TerminatedWorker) == "" {
-		return Task{}, invalidSession(session.ID, "worker_termination_required", fmt.Sprintf("Repairing task %s requires the terminated worker identity %s or explicit user confirmation.", id, workerIdentity))
-	} else if request.TerminatedWorker != workerIdentity {
-		return Task{}, invalidSession(session.ID, "worker_termination_mismatch", fmt.Sprintf("Task %s is assigned to worker %s, not %s.", id, workerIdentity, request.TerminatedWorker))
+	} else if strings.TrimSpace(request.TerminatedAgent) == "" {
+		return Task{}, invalidSession(session.ID, "agent_termination_required", fmt.Sprintf("Repairing task %s requires the terminated agent identity %s or explicit user confirmation.", id, agentIdentity))
+	} else if request.TerminatedAgent != agentIdentity {
+		return Task{}, invalidSession(session.ID, "agent_termination_mismatch", fmt.Sprintf("Task %s is assigned to agent %s, not %s.", id, agentIdentity, request.TerminatedAgent))
 	} else if strings.TrimSpace(request.TerminationProof) == "" {
-		return Task{}, invalidSession(session.ID, "worker_termination_proof_required", fmt.Sprintf("Repairing task %s requires evidence from the parent-held worker handle that %s stopped.", id, workerIdentity))
+		return Task{}, invalidSession(session.ID, "agent_termination_proof_required", fmt.Sprintf("Repairing task %s requires evidence from the parent-held agent handle that %s stopped.", id, agentIdentity))
 	}
 
 	claims, projectError := loadStoredClaims(tx, session.ID, id)
@@ -148,9 +148,9 @@ func (p *Project) RepairTask(id string, request RepairRequest) (Task, *Error) {
 		return Task{}, sessionInternal(session.ID, "invalidate stale task submission", err)
 	}
 	if _, err := tx.Exec(`UPDATE task_leases SET status = 'closed' WHERE task_id = ?`, id); err != nil {
-		return Task{}, sessionInternal(session.ID, "close failed worker lease", err)
+		return Task{}, sessionInternal(session.ID, "close failed agent lease", err)
 	}
-	result, err := tx.Exec(`UPDATE tasks SET status = 'repair_pending', worker_identity = NULL, assignment_token = NULL, updated_at = ? WHERE id = ? AND status = ?`, now, id, status)
+	result, err := tx.Exec(`UPDATE tasks SET status = 'repair_pending', agent_identity = NULL, assignment_token = NULL, updated_at = ? WHERE id = ? AND status = ?`, now, id, status)
 	if err != nil {
 		return Task{}, sessionInternal(session.ID, "mark task repair pending", err)
 	}
@@ -160,7 +160,7 @@ func (p *Project) RepairTask(id string, request RepairRequest) (Task, *Error) {
 		}
 		return Task{}, sessionInternal(session.ID, "confirm task repair", err)
 	}
-	auditResult, err := tx.Exec(`INSERT INTO task_audit_events(session_id, task_id, event, from_status, to_status, worker_identity, termination_proof, occurred_at) VALUES(?, ?, 'task_repair_requested', ?, 'repair_pending', ?, ?, ?)`, session.ID, id, status, nullableString(workerIdentity), nullableString(request.TerminationProof), now)
+	auditResult, err := tx.Exec(`INSERT INTO task_audit_events(session_id, task_id, event, from_status, to_status, agent_identity, termination_proof, occurred_at) VALUES(?, ?, 'task_repair_requested', ?, 'repair_pending', ?, ?, ?)`, session.ID, id, status, nullableString(agentIdentity), nullableString(request.TerminationProof), now)
 	if err != nil {
 		return Task{}, sessionInternal(session.ID, "audit task repair", err)
 	}
