@@ -1,0 +1,4 @@
+interface:
+  display_name: "Debug Bandmaster"
+  short_description: "Diagnose Bandmaster runtime behavior"
+  default_prompt: "Use $debug-bandmaster to diagnose this Bandmaster runtime issue."
