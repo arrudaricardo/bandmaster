@@ -752,6 +752,22 @@ func runBandmaster(t *testing.T, dir string, args ...string) commandResult {
 	return commandResult{exitCode: exitCode, stdout: stdout.String(), stderr: stderr.String()}
 }
 
+func environmentWithOverrides(environment, overrides []string) []string {
+	replaced := make(map[string]bool, len(overrides))
+	for _, entry := range overrides {
+		key, _, _ := strings.Cut(entry, "=")
+		replaced[key] = true
+	}
+	result := make([]string, 0, len(environment)+len(overrides))
+	for _, entry := range environment {
+		key, _, _ := strings.Cut(entry, "=")
+		if !replaced[key] {
+			result = append(result, entry)
+		}
+	}
+	return append(result, overrides...)
+}
+
 func newGitRepository(t *testing.T) string {
 	t.Helper()
 	repo := t.TempDir()

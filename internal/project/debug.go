@@ -1,12 +1,16 @@
 package project
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
@@ -91,6 +95,12 @@ type DebugRepository struct {
 	ChangedPaths []string `json:"changed_paths"`
 	IndexChanged bool     `json:"index_changed"`
 	InspectionOK bool     `json:"inspection_ok"`
+}
+
+type debugGitStatusEntry struct {
+	indexStatus    byte
+	worktreeStatus byte
+	path           string
 }
 
 type DebugState struct {
@@ -334,18 +344,42 @@ func (p *Project) collectDebug(options DebugOptions) DebugSnapshot {
 	defer db.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		snapshot.addCollectionError("database", "state_unavailable", err, isBusyError(err))
+		return snapshot
+	}
+	defer conn.Close()
+	tx, err := beginDebugRead(ctx, conn)
 	if err != nil {
 		snapshot.addCollectionError("database", "state_unavailable", err, isBusyError(err))
 		return snapshot
 	}
 	defer tx.Rollback()
-	_ = tx.QueryRow(`PRAGMA data_version`).Scan(&snapshot.Revision.DatabaseBefore)
 	p.collectDebugDatabase(tx, options, &snapshot)
 	if err := tx.Commit(); err != nil {
 		snapshot.addCollectionError("database", "collection_failed", err, isBusyError(err))
 	}
-	_ = db.QueryRow(`PRAGMA data_version`).Scan(&snapshot.Revision.DatabaseAfter)
+	snapshot.Revision.DatabaseBefore = debugDatabaseRevision(snapshot)
+	if delay, err := time.ParseDuration(os.Getenv("BANDMASTER_TEST_DEBUG_DATABASE_READ_DELAY")); err == nil && delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+		}
+	}
+	verification := newDebugDatabaseSnapshot(snapshot)
+	verificationTx, err := beginDebugRead(ctx, conn)
+	if err != nil {
+		snapshot.addCollectionError("database", "state_unavailable", err, isBusyError(err))
+		return snapshot
+	}
+	defer verificationTx.Rollback()
+	p.collectDebugDatabase(verificationTx, options, &verification)
+	if err := verificationTx.Commit(); err != nil {
+		snapshot.addCollectionError("database", "collection_failed", err, isBusyError(err))
+	}
+	snapshot.Revision.DatabaseAfter = debugDatabaseRevision(verification)
+	applyVerifiedDebugDatabase(&snapshot, verification)
 	// Git is deliberately inspected immediately after the coherent database read.
 	snapshot.Revision.GitAfter = p.gitRevision()
 	if options.CachedRepository == nil || options.ForceGit || options.LastGitRevision != snapshot.Revision.GitAfter || snapshot.Revision.GitBefore != snapshot.Revision.GitAfter {
@@ -356,6 +390,65 @@ func (p *Project) collectDebug(options DebugOptions) DebugSnapshot {
 	snapshot.Collection.Stable = snapshot.Revision.DatabaseBefore == snapshot.Revision.DatabaseAfter && snapshot.Revision.GitBefore == snapshot.Revision.GitAfter
 	p.deriveDiagnostics(&snapshot)
 	return snapshot
+}
+
+func beginDebugRead(ctx context.Context, conn *sql.Conn) (*sql.Tx, error) {
+	tx, err := conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	var schemaEntries int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema`).Scan(&schemaEntries); err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	return tx, nil
+}
+
+func newDebugDatabaseSnapshot(snapshot DebugSnapshot) DebugSnapshot {
+	return DebugSnapshot{
+		Collection: DebugCollection{Status: "complete", Stable: true, Errors: []DebugCollectionError{}},
+		Configuration: DebugConfiguration{
+			Status:  snapshot.Configuration.Status,
+			Present: snapshot.Configuration.Present,
+			Digest:  snapshot.Configuration.Digest,
+		},
+		Tasks: []DebugTask{}, Workers: []DebugWorker{}, Batches: []DebugBatch{}, Monitors: []DebugMonitor{}, Integrity: []DebugIntegrity{}, Events: []DebugEvent{}, Diagnostics: []DebugDiagnostic{},
+	}
+}
+
+func debugDatabaseRevision(snapshot DebugSnapshot) int64 {
+	payload := struct {
+		SchemaVersion string
+		Configuration DebugConfiguration
+		Session       *DebugSession
+		Tasks         []DebugTask
+		Workers       []DebugWorker
+		Batches       []DebugBatch
+		Monitors      []DebugMonitor
+		Integrity     []DebugIntegrity
+		Events        []DebugEvent
+	}{snapshot.State.SchemaVersion, snapshot.Configuration, snapshot.Session, snapshot.Tasks, snapshot.Workers, snapshot.Batches, snapshot.Monitors, snapshot.Integrity, snapshot.Events}
+	encoded, _ := json.Marshal(payload)
+	digest := sha256.Sum256(encoded)
+	return int64(binary.BigEndian.Uint64(digest[:8]) & uint64(^uint64(0)>>1))
+}
+
+func applyVerifiedDebugDatabase(snapshot *DebugSnapshot, verification DebugSnapshot) {
+	snapshot.State.SchemaVersion = verification.State.SchemaVersion
+	snapshot.Configuration = verification.Configuration
+	snapshot.Session = verification.Session
+	snapshot.Tasks = verification.Tasks
+	snapshot.Workers = verification.Workers
+	snapshot.Batches = verification.Batches
+	snapshot.Monitors = verification.Monitors
+	snapshot.Integrity = verification.Integrity
+	snapshot.Events = verification.Events
+	if len(verification.Collection.Errors) != 0 {
+		snapshot.Collection.Status = "partial"
+		snapshot.Collection.Stable = false
+		snapshot.Collection.Errors = append(snapshot.Collection.Errors, verification.Collection.Errors...)
+	}
 }
 
 func debugRuntime(options DebugOptions) DebugRuntime {
@@ -398,7 +491,7 @@ func openDebugState(path string) (*sql.DB, error) {
 func (p *Project) collectDebugRepository(snapshot *DebugSnapshot) {
 	branch, branchErr := debugGitOutput(p.Root, "symbolic-ref", "--quiet", "--short", "HEAD")
 	head, headErr := debugGitOutput(p.Root, "rev-parse", "--verify", "HEAD")
-	status, statusErr := debugGitOutput(p.Root, "status", "--porcelain=v1")
+	status, statusErr := debugGitStatus(p.Root)
 	if branchErr == nil {
 		snapshot.Repository.Branch = branch
 	}
@@ -406,16 +499,9 @@ func (p *Project) collectDebugRepository(snapshot *DebugSnapshot) {
 		snapshot.Repository.Head = head
 	}
 	if statusErr == nil {
-		for _, line := range strings.Split(status, "\n") {
-			if len(line) < 4 {
-				continue
-			}
-			path := line[3:]
-			if arrow := strings.LastIndex(path, " -> "); arrow >= 0 {
-				path = path[arrow+4:]
-			}
-			snapshot.Repository.ChangedPaths = append(snapshot.Repository.ChangedPaths, path)
-			if line[0] != ' ' && line[0] != '?' {
+		for _, entry := range parseDebugGitStatus(status) {
+			snapshot.Repository.ChangedPaths = append(snapshot.Repository.ChangedPaths, entry.path)
+			if entry.indexStatus != ' ' && entry.indexStatus != '?' {
 				snapshot.Repository.IndexChanged = true
 			}
 		}
@@ -429,6 +515,25 @@ func (p *Project) collectDebugRepository(snapshot *DebugSnapshot) {
 	}
 	_ = branchErr
 	_ = headErr
+}
+
+func parseDebugGitStatus(status []byte) []debugGitStatusEntry {
+	records := bytes.Split(status, []byte{0})
+	entries := make([]debugGitStatusEntry, 0, len(records))
+	for index := 0; index < len(records); index++ {
+		record := records[index]
+		if len(record) < 4 {
+			continue
+		}
+		entry := debugGitStatusEntry{indexStatus: record[0], worktreeStatus: record[1], path: string(record[3:])}
+		entries = append(entries, entry)
+		if entry.indexStatus == 'R' || entry.indexStatus == 'C' || entry.worktreeStatus == 'R' || entry.worktreeStatus == 'C' {
+			// Porcelain v1 -z emits the destination first and the source as
+			// the following NUL-delimited record. Diagnostics use destinations.
+			index++
+		}
+	}
+	return entries
 }
 
 func (p *Project) collectDebugConfiguration(snapshot *DebugSnapshot) {
@@ -537,14 +642,45 @@ func (p *Project) gitRevision() string {
 	if info, err := os.Stat(filepath.Join(p.GitDir, "index")); err == nil {
 		index = fmt.Sprintf("%d:%d", info.Size(), info.ModTime().UnixNano())
 	}
-	return head + ":" + index
+	status, _ := debugGitStatus(p.Root)
+	worktree := sha256.New()
+	_, _ = worktree.Write(status)
+	for _, entry := range parseDebugGitStatus(status) {
+		_, _ = fmt.Fprintf(worktree, "\x00%s\x00", entry.path)
+		info, err := os.Lstat(filepath.Join(p.Root, filepath.FromSlash(entry.path)))
+		if err != nil {
+			_, _ = fmt.Fprintf(worktree, "missing:%v", err)
+			continue
+		}
+		_, _ = fmt.Fprintf(worktree, "%d:%d:%d", info.Mode(), info.Size(), info.ModTime().UnixNano())
+		path := filepath.Join(p.Root, filepath.FromSlash(entry.path))
+		if info.Mode().IsRegular() {
+			if file, err := os.Open(path); err == nil {
+				_, _ = io.Copy(worktree, file)
+				_ = file.Close()
+			}
+		} else if info.Mode()&os.ModeSymlink != 0 {
+			if target, err := os.Readlink(path); err == nil {
+				_, _ = fmt.Fprintf(worktree, ":%s", target)
+			}
+		}
+	}
+	return fmt.Sprintf("%s:%s:%x", head, index, worktree.Sum(nil)[:8])
+}
+
+func debugGitStatus(root string) ([]byte, error) {
+	return debugGitBytes(root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
 }
 
 func debugGitOutput(dir string, args ...string) (string, error) {
-	command := exec.Command("git", append([]string{"--no-optional-locks", "-C", dir}, args...)...)
-	output, err := command.Output()
+	output, err := debugGitBytes(dir, args...)
 	value := strings.TrimSuffix(string(output), "\n")
 	return strings.TrimSuffix(value, "\r"), err
+}
+
+func debugGitBytes(dir string, args ...string) ([]byte, error) {
+	command := exec.Command("git", append([]string{"--no-optional-locks", "-C", dir}, args...)...)
+	return command.Output()
 }
 
 func fingerprint(value string) string {

@@ -2,14 +2,439 @@ package integration_test
 
 import (
 	"bufio"
+	"database/sql"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
+
+type debugLease struct {
+	Status    string `json:"status"`
+	ExpiresAt string `json:"expires_at"`
+}
+
+type debugTask struct {
+	ID             string      `json:"id"`
+	Status         string      `json:"status"`
+	WorkerIdentity string      `json:"worker_identity"`
+	Lease          *debugLease `json:"lease"`
+}
+
+type debugAffected struct {
+	TaskIDs []string `json:"task_ids"`
+	Workers []string `json:"worker_identities"`
+	Paths   []string `json:"paths"`
+}
+
+type debugDiagnostic struct {
+	Code             string        `json:"code"`
+	Severity         string        `json:"severity"`
+	SuggestedActions []string      `json:"suggested_actions"`
+	Affected         debugAffected `json:"affected"`
+}
+
+type debugResponse struct {
+	Success bool `json:"success"`
+	Result  struct {
+		Collection struct {
+			Status     string `json:"status"`
+			Stable     bool   `json:"stable"`
+			BestEffort bool   `json:"best_effort"`
+		} `json:"collection"`
+		Repository struct {
+			ChangedPaths []string `json:"changed_paths"`
+			IndexChanged bool     `json:"index_changed"`
+		} `json:"repository"`
+		Tasks       []debugTask       `json:"tasks"`
+		Diagnostics []debugDiagnostic `json:"diagnostics"`
+		Revision    struct {
+			DatabaseBefore int64  `json:"database_before"`
+			DatabaseAfter  int64  `json:"database_after"`
+			GitBefore      string `json:"git_before"`
+			GitAfter       string `json:"git_after"`
+		} `json:"revision"`
+	} `json:"result"`
+}
+
+func runDebugJSON(t *testing.T, repo string, args ...string) debugResponse {
+	t.Helper()
+	commandArgs := []string{"debug"}
+	commandArgs = append(commandArgs, args...)
+	commandArgs = append(commandArgs, "--json")
+	result := runBandmaster(t, repo, commandArgs...)
+	return decodeDebugJSON(t, result)
+}
+
+func decodeDebugJSON(t *testing.T, result commandResult) debugResponse {
+	t.Helper()
+	if result.exitCode != 0 {
+		t.Fatalf("debug exit=%d stdout=%s stderr=%s", result.exitCode, result.stdout, result.stderr)
+	}
+	var response debugResponse
+	if err := json.Unmarshal([]byte(result.stdout), &response); err != nil {
+		t.Fatalf("decode debug response: %v\n%s", err, result.stdout)
+	}
+	if !response.Success {
+		t.Fatalf("debug response was unsuccessful: %+v", response)
+	}
+	return response
+}
+
+func TestDebugRetriesTransientGitMutationAndReportsPersistentMutation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test Git wrapper requires a POSIX shell")
+	}
+	for _, test := range []struct {
+		name           string
+		persistent     bool
+		wantStable     bool
+		wantBestEffort bool
+	}{
+		{name: "transient", wantStable: true},
+		{name: "persistent", persistent: true, wantBestEffort: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repo := approvedCleanRepository(t)
+			wrapperDir := t.TempDir()
+			counterPath := filepath.Join(wrapperDir, "status-count")
+			markerPath := filepath.Join(wrapperDir, "mutation-recorded")
+			mutationPath := filepath.Join(repo, "changing.txt")
+			realGit, err := exec.LookPath("git")
+			if err != nil {
+				t.Fatal(err)
+			}
+			wrapper := `#!/bin/sh
+"$BANDMASTER_REAL_GIT" "$@"
+result=$?
+case " $* " in
+  *" status "*)
+    count=0
+    if [ -f "$BANDMASTER_GIT_COUNT" ]; then count=$(sed -n '1p' "$BANDMASTER_GIT_COUNT"); fi
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$BANDMASTER_GIT_COUNT"
+    if [ "$BANDMASTER_MUTATION_MODE" = persistent ] || { [ "$count" -eq 2 ] && [ ! -f "$BANDMASTER_MUTATION_MARKER" ]; }; then
+      printf '%s\n' "$count" > "$BANDMASTER_MUTATION_PATH"
+      : > "$BANDMASTER_MUTATION_MARKER"
+    fi
+    ;;
+esac
+exit "$result"
+`
+			wrapperPath := filepath.Join(wrapperDir, "git")
+			writeFile(t, wrapperPath, wrapper)
+			if err := os.Chmod(wrapperPath, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			mode := "transient"
+			if test.persistent {
+				mode = "persistent"
+			}
+			result := runBandmasterWithEnvironment(t, repo, []string{
+				"PATH=" + wrapperDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"BANDMASTER_REAL_GIT=" + realGit,
+				"BANDMASTER_GIT_COUNT=" + counterPath,
+				"BANDMASTER_MUTATION_MARKER=" + markerPath,
+				"BANDMASTER_MUTATION_MODE=" + mode,
+				"BANDMASTER_MUTATION_PATH=" + mutationPath,
+			}, "debug", "--json")
+			response := decodeDebugJSON(t, result)
+			if response.Result.Collection.Stable != test.wantStable || response.Result.Collection.BestEffort != test.wantBestEffort {
+				t.Fatalf("collection = %+v revision = %+v", response.Result.Collection, response.Result.Revision)
+			}
+			count, err := strconv.Atoi(strings.TrimSpace(readFile(t, counterPath)))
+			if err != nil || count < 6 {
+				t.Fatalf("debug did not exercise bounded retry: status count=%d err=%v", count, err)
+			}
+			if test.wantStable && (response.Result.Revision.GitBefore != response.Result.Revision.GitAfter) {
+				t.Fatalf("stable retry retained unequal Git boundaries: %+v", response.Result.Revision)
+			}
+			if test.wantBestEffort && (response.Result.Revision.GitBefore == response.Result.Revision.GitAfter) {
+				t.Fatalf("persistent mutation was not reflected in Git boundaries: %+v", response.Result.Revision)
+			}
+		})
+	}
+}
+
+func TestDebugRetriesTransientPublicDatabaseMutation(t *testing.T) {
+	repo := approvedCleanRepository(t)
+	successfulSessionCommand(t, repo, "start")
+	running := newBandmasterCommand(repo, "debug", "--json")
+	running.command.Env = environmentWithOverrides(os.Environ(), []string{"BANDMASTER_TEST_DEBUG_DATABASE_READ_DELAY=1500ms"})
+	startedAt := time.Now()
+	if err := running.command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	// Wait until the compiled process has its read-only state connection open;
+	// by the time lsof returns, the first coherent read has entered its delay.
+	lsof, err := exec.LookPath("lsof")
+	if err != nil {
+		running.command.Process.Kill()
+		t.Skip("lsof is required to synchronize the compiled debug process")
+	}
+	statePath := filepath.Join(repo, ".git", "bandmaster", "state.db")
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if err := exec.Command(lsof, "-a", "-p", strconv.Itoa(running.command.Process.Pid), "--", statePath).Run(); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("debug did not open its read-only state connection")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	successfulTaskCommand(t, repo, "create",
+		"--title", "Concurrent public mutation",
+		"--intent", "Exercise debug retry",
+		"--expected-outcome", "The second observation is stable",
+	)
+	successfulSessionCommand(t, repo, "pause")
+	result := waitBandmasterCommand(t, running)
+	response := decodeDebugJSON(t, result)
+	if !response.Result.Collection.Stable || response.Result.Collection.BestEffort {
+		t.Fatalf("transient public mutation did not yield a stable retry: collection=%+v revision=%+v", response.Result.Collection, response.Result.Revision)
+	}
+	if elapsed := time.Since(startedAt); elapsed < 2700*time.Millisecond {
+		t.Fatalf("debug returned before the bounded retry: elapsed=%s collection=%+v revision=%+v", elapsed, response.Result.Collection, response.Result.Revision)
+	}
+}
+
+func TestDebugIdleSnapshotsAreStable(t *testing.T) {
+	repo := approvedCleanRepository(t)
+	successfulSessionCommand(t, repo, "start")
+	successfulSessionCommand(t, repo, "finish")
+
+	for attempt := 0; attempt < 2; attempt++ {
+		response := runDebugJSON(t, repo)
+		if response.Result.Collection.Status != "complete" || !response.Result.Collection.Stable || response.Result.Collection.BestEffort {
+			t.Fatalf("idle snapshot %d collection = %+v revision = %+v", attempt+1, response.Result.Collection, response.Result.Revision)
+		}
+		if response.Result.Revision.DatabaseBefore != response.Result.Revision.DatabaseAfter || response.Result.Revision.GitBefore != response.Result.Revision.GitAfter {
+			t.Fatalf("idle snapshot %d revision boundaries differ: %+v", attempt+1, response.Result.Revision)
+		}
+	}
+	human := runBandmaster(t, repo, "debug")
+	if human.exitCode != 0 || strings.Contains(human.stdout, "best effort") {
+		t.Fatalf("idle human output reported degraded collection: exit=%d stdout=%q stderr=%q", human.exitCode, human.stdout, human.stderr)
+	}
+	watch := startDebugWatch(t, repo)
+	initial := watch.read(t, 5*time.Second)
+	snapshot, _ := initial["snapshot"].(map[string]any)
+	collection, _ := snapshot["collection"].(map[string]any)
+	if initial["type"] != "snapshot" || collection["stable"] != true || collection["best_effort"] != false {
+		t.Fatalf("idle watch snapshot did not preserve corrected collection state: %#v", initial)
+	}
+	heartbeat := watch.read(t, 12*time.Second)
+	heartbeatCollection, _ := heartbeat["collection"].(map[string]any)
+	if heartbeat["type"] != "heartbeat" || heartbeatCollection["stable"] != true || heartbeatCollection["best_effort"] != false {
+		t.Fatalf("idle watch heartbeat did not preserve corrected collection state: %#v", heartbeat)
+	}
+	watch.stop(t)
+}
+
+func TestDebugCorrelatesClaimsWithFilesInsideNewDirectories(t *testing.T) {
+	repo := approvedCleanRepository(t)
+	successfulSessionCommand(t, repo, "start")
+	created := successfulTaskCommand(t, repo, "create",
+		"--title", "Create generated files",
+		"--intent", "Exercise exact ownership diagnostics",
+		"--expected-outcome", "Only unclaimed files are reported",
+	)
+	assigned := successfulTaskCommand(t, repo, "assign", created.Result.ID, "--worker", "worker-generated")
+	successfulTaskCommand(t, repo, "claim", created.Result.ID,
+		"--token", assigned.Result.AssignmentToken,
+		"--path", "generated/one.txt",
+		"--path", "generated/two.txt",
+	)
+	writeFile(t, filepath.Join(repo, "generated", "one.txt"), "one\n")
+	writeFile(t, filepath.Join(repo, "generated", "two.txt"), "two\n")
+
+	owned := runDebugJSON(t, repo)
+	if got, want := strings.Join(owned.Result.Repository.ChangedPaths, ","), "generated/one.txt,generated/two.txt"; got != want {
+		t.Fatalf("changed paths = %q, want %q", got, want)
+	}
+	if diagnostics := debugDiagnosticsByCode(owned, "unowned_worktree_drift"); len(diagnostics) != 0 {
+		t.Fatalf("fully claimed directory reported unowned drift: %+v", diagnostics)
+	}
+
+	writeFile(t, filepath.Join(repo, "generated", "unclaimed.txt"), "unclaimed\n")
+	mixed := runDebugJSON(t, repo)
+	diagnostics := debugDiagnosticsByCode(mixed, "unowned_worktree_drift")
+	if len(diagnostics) != 1 || strings.Join(diagnostics[0].Affected.Paths, ",") != "generated/unclaimed.txt" {
+		t.Fatalf("mixed directory diagnostics = %+v", diagnostics)
+	}
+}
+
+func TestDebugPreservesTrackedGitStatusPaths(t *testing.T) {
+	repo := approvedCleanRepository(t)
+	writeFile(t, filepath.Join(repo, "modified.txt"), "before\n")
+	writeFile(t, filepath.Join(repo, "deleted.txt"), "delete me\n")
+	writeFile(t, filepath.Join(repo, "rename-source.txt"), "rename me\n")
+	runGit(t, repo, "add", "modified.txt", "deleted.txt", "rename-source.txt")
+	runGit(t, repo, "commit", "-m", "Add debug Git fixtures")
+
+	writeFile(t, filepath.Join(repo, "modified.txt"), "after\n")
+	if err := os.Remove(filepath.Join(repo, "deleted.txt")); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "mv", "rename-source.txt", "rename-destination.txt")
+	writeFile(t, filepath.Join(repo, "untracked", "new.txt"), "new\n")
+
+	response := runDebugJSON(t, repo)
+	paths := append([]string(nil), response.Result.Repository.ChangedPaths...)
+	sort.Strings(paths)
+	if got, want := strings.Join(paths, ","), "deleted.txt,modified.txt,rename-destination.txt,untracked/new.txt"; got != want {
+		t.Fatalf("tracked/untracked changed paths = %q, want %q", got, want)
+	}
+	if !response.Result.Repository.IndexChanged {
+		t.Fatal("staged rename did not set index_changed")
+	}
+}
+
+func TestDebugLeaseDiagnosticsOnlyDescribeLiveWorkerOwnership(t *testing.T) {
+	repo := approvedCleanRepositoryWithLeaseDuration(t, "2s")
+	successfulSessionCommand(t, repo, "start")
+	live := successfulTaskCommand(t, repo, "create",
+		"--title", "Live leased work",
+		"--intent", "Keep active ownership actionable",
+		"--expected-outcome", "Lease timing is diagnosed",
+	)
+	live = successfulTaskCommand(t, repo, "assign", live.Result.ID, "--worker", "worker-live")
+	terminal := successfulTaskCommand(t, repo, "create",
+		"--title", "Canceled leased work",
+		"--intent", "Preserve historical lease evidence",
+		"--expected-outcome", "Terminal history is not actionable",
+	)
+	terminal = successfulTaskCommand(t, repo, "assign", terminal.Result.ID, "--worker", "worker-terminal")
+	terminal = successfulTaskCommand(t, repo, "cancel", terminal.Result.ID,
+		"--terminated-worker", "worker-terminal",
+		"--termination-proof", "codex-handle-worker-terminal-stopped",
+	)
+
+	liveExpiry, err := time.Parse(time.RFC3339Nano, live.Result.Lease.ExpiresAt)
+	if err != nil {
+		t.Fatalf("parse live lease expiry: %v", err)
+	}
+	if wait := time.Until(liveExpiry.Add(-350 * time.Millisecond)); wait > 0 {
+		time.Sleep(wait)
+	}
+	expiring := runDebugJSON(t, repo)
+	expiringDiagnostics := debugDiagnosticsByCode(expiring, "lease_expiring")
+	if len(expiringDiagnostics) != 1 || strings.Join(expiringDiagnostics[0].Affected.TaskIDs, ",") != live.Result.ID || strings.Join(expiringDiagnostics[0].Affected.Workers, ",") != "worker-live" {
+		t.Fatalf("expiring diagnostics = %+v", expiringDiagnostics)
+	}
+	if len(expiringDiagnostics[0].SuggestedActions) == 0 || !strings.Contains(expiringDiagnostics[0].SuggestedActions[0], "task heartbeat "+live.Result.ID) {
+		t.Fatalf("expiring suggestion is unusable: %+v", expiringDiagnostics[0].SuggestedActions)
+	}
+
+	if wait := time.Until(liveExpiry.Add(150 * time.Millisecond)); wait > 0 {
+		time.Sleep(wait)
+	}
+	expired := runDebugJSON(t, repo)
+	expiredDiagnostics := debugDiagnosticsByCode(expired, "lease_expired")
+	if len(expiredDiagnostics) != 1 || strings.Join(expiredDiagnostics[0].Affected.TaskIDs, ",") != live.Result.ID || strings.Join(expiredDiagnostics[0].Affected.Workers, ",") != "worker-live" || expiredDiagnostics[0].Severity != "error" {
+		t.Fatalf("expired diagnostics = %+v", expiredDiagnostics)
+	}
+	if len(expiredDiagnostics[0].SuggestedActions) == 0 || !strings.Contains(expiredDiagnostics[0].SuggestedActions[0], "--terminated-worker worker-live") {
+		t.Fatalf("expired recovery suggestion is unusable: %+v", expiredDiagnostics[0].SuggestedActions)
+	}
+	terminalSnapshot := debugTaskByID(t, expired, terminal.Result.ID)
+	if terminalSnapshot.Status != "canceled" || terminalSnapshot.Lease == nil || terminalSnapshot.Lease.ExpiresAt == "" {
+		t.Fatalf("terminal lease history was not preserved: %+v", terminalSnapshot)
+	}
+	for _, diagnostic := range expired.Result.Diagnostics {
+		for _, action := range diagnostic.SuggestedActions {
+			if strings.Contains(action, "--terminated-worker  ") {
+				t.Fatalf("suggested action contains an empty worker identity: %q", action)
+			}
+		}
+	}
+}
+
+func TestDebugCompiledCLIKeepsTerminalHistoricalLeasesNonActionable(t *testing.T) {
+	repo := approvedCleanRepository(t)
+	writeFile(t, filepath.Join(repo, "changed-terminal.txt"), "before\n")
+	writeFile(t, filepath.Join(repo, "unchanged-terminal.txt"), "stable\n")
+	runGit(t, repo, "add", "changed-terminal.txt", "unchanged-terminal.txt")
+	runGit(t, repo, "commit", "-m", "Add terminal lease fixtures")
+	successfulSessionCommand(t, repo, "start")
+	changed := successfulTaskCommand(t, repo, "create", "--title", "Committed terminal task", "--intent", "Create a committed task", "--expected-outcome", "Historical lease stays evidence-only")
+	noOp := successfulTaskCommand(t, repo, "create", "--title", "No-op terminal task", "--intent", "Create a no-op task", "--expected-outcome", "Historical lease stays evidence-only")
+	changedAssignment := successfulTaskCommand(t, repo, "assign", changed.Result.ID, "--worker", "worker-committed")
+	noOpAssignment := successfulTaskCommand(t, repo, "assign", noOp.Result.ID, "--worker", "worker-no-op")
+	successfulTaskCommand(t, repo, "claim", changed.Result.ID, "--token", changedAssignment.Result.AssignmentToken, "--path", "changed-terminal.txt")
+	successfulTaskCommand(t, repo, "claim", noOp.Result.ID, "--token", noOpAssignment.Result.AssignmentToken, "--path", "unchanged-terminal.txt")
+	writeFile(t, filepath.Join(repo, "changed-terminal.txt"), "after\n")
+	submitBatchTask(t, repo, changed.Result.ID, changedAssignment.Result.AssignmentToken)
+	submitBatchTask(t, repo, noOp.Result.ID, noOpAssignment.Result.AssignmentToken)
+	successfulBatchCommand(t, repo, "freeze")
+	successfulBatchCommand(t, repo, "validate")
+	successfulBatchCommand(t, repo, "commit")
+	if status := successfulTaskCommand(t, repo, "inspect", changed.Result.ID).Result.Status; status != "committed" {
+		t.Fatalf("changed task status = %q, want committed", status)
+	}
+	if status := successfulTaskCommand(t, repo, "inspect", noOp.Result.ID).Result.Status; status != "no_op" {
+		t.Fatalf("unchanged task status = %q, want no_op", status)
+	}
+
+	// Supported current workflows release terminal leases. Recreate only the
+	// legacy historical-lease condition; all assertions stay at the freshly
+	// compiled CLI's public JSON boundary.
+	state, err := sql.Open("sqlite3", filepath.Join(repo, ".git", "bandmaster", "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiresAt := "2000-01-01T00:00:00Z"
+	if _, err := state.Exec(`UPDATE task_leases SET status = 'active', renewed_at = ?, expires_at = ? WHERE task_id IN (?, ?)`, expiresAt, expiresAt, changed.Result.ID, noOp.Result.ID); err != nil {
+		state.Close()
+		t.Fatal(err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	response := runDebugJSON(t, repo)
+	for _, id := range []string{changed.Result.ID, noOp.Result.ID} {
+		task := debugTaskByID(t, response, id)
+		if task.Lease == nil || task.Lease.Status != "active" || task.Lease.ExpiresAt != expiresAt {
+			t.Fatalf("terminal task %s lost historical lease evidence: %+v", id, task)
+		}
+		for _, code := range []string{"lease_expired", "lease_expiring"} {
+			for _, diagnostic := range debugDiagnosticsByCode(response, code) {
+				if strings.Join(diagnostic.Affected.TaskIDs, ",") == id {
+					t.Fatalf("terminal task %s received %s: %+v", id, code, diagnostic)
+				}
+			}
+		}
+	}
+}
+
+func debugTaskByID(t *testing.T, response debugResponse, id string) debugTask {
+	t.Helper()
+	for _, task := range response.Result.Tasks {
+		if task.ID == id {
+			return task
+		}
+	}
+	t.Fatalf("debug snapshot omitted task %s", id)
+	return debugTask{}
+}
+
+func debugDiagnosticsByCode(response debugResponse, code string) []debugDiagnostic {
+	var diagnostics []debugDiagnostic
+	for _, diagnostic := range response.Result.Diagnostics {
+		if diagnostic.Code == code {
+			diagnostics = append(diagnostics, diagnostic)
+		}
+	}
+	return diagnostics
+}
 
 func TestDebugUninitializedRepositoryIsUsefulAndReadOnly(t *testing.T) {
 	repo := newGitRepository(t)

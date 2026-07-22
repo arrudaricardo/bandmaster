@@ -290,7 +290,7 @@ func runBandmasterWithEnvironment(t *testing.T, dir string, environment []string
 	t.Helper()
 	cmd := exec.Command(bandmasterBinary, args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), environment...)
+	cmd.Env = environmentWithOverrides(os.Environ(), environment)
 	var stdout, stderr strings.Builder
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()

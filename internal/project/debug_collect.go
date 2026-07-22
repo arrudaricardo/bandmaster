@@ -297,7 +297,7 @@ func deriveWorkers(snapshot *DebugSnapshot) {
 			workers[task.WorkerIdentity] = worker
 		}
 		worker.TaskIDs = append(worker.TaskIDs, task.ID)
-		if task.Status == "assigned" || task.Status == "editing" {
+		if taskCanCarryLiveWorkerOwnership(task.Status) {
 			worker.ActiveTaskID = task.ID
 			worker.Lease = task.Lease
 		}
@@ -380,11 +380,12 @@ func (p *Project) deriveDiagnostics(snapshot *DebugSnapshot) {
 		statusByTask[task.ID] = task.Status
 	}
 	for _, task := range snapshot.Tasks {
-		if task.Lease != nil {
+		liveWorkerOwnership := taskCanCarryLiveWorkerOwnership(task.Status)
+		if liveWorkerOwnership && task.WorkerIdentity != "" && task.Lease != nil {
 			expires, err := time.Parse(time.RFC3339Nano, task.Lease.ExpiresAt)
 			if err == nil && now.After(expires) && task.Lease.Status == "active" {
 				addDiagnostic("lease_expired", "error", DebugAffected{TaskIDs: []string{task.ID}, Workers: []string{task.WorkerIdentity}}, map[string]any{"expires_at": task.Lease.ExpiresAt}, "bandmaster task recover "+task.ID+" --terminated-worker "+task.WorkerIdentity+" --termination-proof <proof> --json", "bandmaster task inspect "+task.ID+" --json")
-			} else if err == nil && task.Lease.Status == "active" && expires.Sub(now) <= time.Duration(task.Lease.DurationNanos)/4 {
+			} else if err == nil && task.AssignmentTokenPresent && task.Lease.Status == "active" && expires.Sub(now) <= time.Duration(task.Lease.DurationNanos)/4 {
 				addDiagnostic("lease_expiring", "warning", DebugAffected{TaskIDs: []string{task.ID}, Workers: []string{task.WorkerIdentity}}, map[string]any{"expires_at": task.Lease.ExpiresAt, "remaining_milliseconds": expires.Sub(now).Milliseconds()}, "bandmaster task heartbeat "+task.ID+" --token <assignment-token> --json")
 			}
 		}
@@ -411,7 +412,7 @@ func (p *Project) deriveDiagnostics(snapshot *DebugSnapshot) {
 				addDiagnostic("dependency_wait", "info", DebugAffected{TaskIDs: []string{task.ID, prerequisite}}, map[string]any{"task_id": task.ID, "prerequisite_id": prerequisite, "prerequisite_status": statusByTask[prerequisite]}, "bandmaster task inspect "+prerequisite+" --json")
 			}
 		}
-		if (task.Status == "assigned" || task.Status == "editing") && (task.WorkerIdentity == "" || task.Lease == nil) {
+		if taskCanCarryLiveWorkerOwnership(task.Status) && (task.WorkerIdentity == "" || task.Lease == nil) {
 			addDiagnostic("worker_invariant_failure", "critical", DebugAffected{TaskIDs: []string{task.ID}, Workers: []string{task.WorkerIdentity}}, map[string]any{"status": task.Status, "worker_present": task.WorkerIdentity != "", "lease_present": task.Lease != nil}, "bandmaster doctor --json")
 		}
 	}
@@ -431,6 +432,10 @@ func (p *Project) deriveDiagnostics(snapshot *DebugSnapshot) {
 		snapshot.Workers[index].Diagnostics = sortedUnique(snapshot.Workers[index].Diagnostics)
 	}
 	_ = p
+}
+
+func taskCanCarryLiveWorkerOwnership(status string) bool {
+	return status == "assigned" || status == "editing"
 }
 
 // DebugSemanticState produces a stable, secret-free representation used by the watcher.
