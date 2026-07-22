@@ -7,6 +7,7 @@ import (
 
 func (p *Project) scanRepository(queryer databaseQuerier, session Session) ([]integrityObservation, *Error) {
 	var observations []integrityObservation
+	indexDriftObserved := false
 	branch, branchErr := gitOutput(p.Root, "symbolic-ref", "--quiet", "--short", "HEAD")
 	if branchErr != nil || branch != session.StartingBranch {
 		observations = append(observations, integrityObservation{Kind: "branch_drift", Path: ".git/HEAD", ObservedState: map[string]any{"expected": session.StartingBranch, "observed": branch, "attached": branchErr == nil}})
@@ -23,6 +24,7 @@ func (p *Project) scanRepository(queryer databaseQuerier, session Session) ([]in
 		return nil, sessionInternal(session.ID, "inspect Git index", err)
 	} else if !clean {
 		observations = append(observations, integrityObservation{Kind: "index_drift", Path: ".git/index", ObservedState: map[string]any{"clean": false}})
+		indexDriftObserved = true
 	}
 
 	changed, projectError := p.changedPaths()
@@ -52,6 +54,16 @@ func (p *Project) scanRepository(queryer databaseQuerier, session Session) ([]in
 		}
 		if found {
 			observations = append(observations, observation)
+		}
+	}
+	// Git can change between the index check above and the worktree scan. Recheck
+	// before accepting path-level observations so staged drift remains the
+	// primary diagnosis even when it appeared midway through collection.
+	if !indexDriftObserved {
+		if clean, err := gitQuiet(p.Root, "diff", "--cached", "--quiet", "--exit-code"); err != nil {
+			return nil, sessionInternal(session.ID, "recheck Git index", err)
+		} else if !clean {
+			observations = append([]integrityObservation{{Kind: "index_drift", Path: ".git/index", ObservedState: map[string]any{"clean": false}}}, observations...)
 		}
 	}
 

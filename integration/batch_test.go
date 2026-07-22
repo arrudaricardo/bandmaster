@@ -3,6 +3,7 @@ package integration_test
 import (
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -214,8 +215,11 @@ func TestBatchBarrierQuarantinesIndexDrift(t *testing.T) {
 		{
 			name: "index",
 			mutate: func(t *testing.T, repo string) {
+				fixture := filepath.Join(t.TempDir(), "staged.txt")
+				writeFile(t, fixture, "outside index change\n")
+				blob := strings.TrimSpace(runGit(t, repo, "hash-object", "-w", fixture))
+				runGit(t, repo, "update-index", "--add", "--cacheinfo", "100644", blob, "staged.txt")
 				writeFile(t, filepath.Join(repo, "staged.txt"), "outside index change\n")
-				runGit(t, repo, "add", "staged.txt")
 			},
 			wantCode: "index_drift",
 		},
